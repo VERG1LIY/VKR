@@ -1,0 +1,41 @@
+# Виртуальное окружение
+venv/
+.venv/
+
+# База данных
+*.db
+*.sqlite3
+fallback_db.json
+
+# Файлы конфигурации
+.env
+
+# Загруженные файлы
+uploads/documents/*
+!uploads/documents/.gitkeep
+
+# Логи
+logs/
+*.log
+
+# Кэш Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Дистрибутивы
+dist/
+build/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
