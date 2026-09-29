@@ -11,8 +11,14 @@ load_dotenv()
 class Config:
     """Класс конфигурации приложения."""
 
-    # Telegram
-    TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
+    # VK Callback API
+    VK_ACCESS_TOKEN: str = os.getenv("VK_ACCESS_TOKEN", "")
+    VK_CALLBACK_SECRET: str = os.getenv("VK_CALLBACK_SECRET", "")
+    VK_CONFIRMATION_CODE: str = os.getenv("VK_CONFIRMATION_CODE", "")
+    VK_API_VERSION: str = os.getenv("VK_API_VERSION", "5.199")
+    HOST: str = os.getenv("HOST", "127.0.0.1")
+    PORT: int = int(os.getenv("PORT", "3000"))
+    VK_CALLBACK_PATH: str = os.getenv("VK_CALLBACK_PATH", "/")
 
     # База данных
     DATABASE_URL: str = os.getenv(

@@ -16,7 +16,7 @@ from sqlalchemy.future import select
 from sqlalchemy import update as sql_update, delete as sql_delete
 
 from config import Config
-from database.models import Base, Document, DocumentHistory, User
+from database.models import Base, Document, DocumentHistory, User, VKUser
 
 
 class DocumentDatabase:
@@ -36,6 +36,7 @@ class DocumentDatabase:
         self._engine = None
         self._session_factory = None
         self._fallback_storage: Dict[str, Dict] = {}  # JSON fallback хранилище
+        self._seen_vk_users = set()
 
     async def initialize(self):
         """Инициализация движка БД и создание таблиц."""
@@ -446,6 +447,37 @@ class DocumentDatabase:
             return len(result.scalars().all())
         except:
             return 0
+        finally:
+            await session.close()
+
+    async def register_vk_user(self, vk_id: int) -> bool:
+        """Регистрирует пользователя VK; True означает первое обращение."""
+        session = await self.get_session()
+        if not session:
+            if vk_id in self._seen_vk_users:
+                return False
+            self._seen_vk_users.add(vk_id)
+            return True
+
+        try:
+            existing = await session.execute(
+                select(VKUser).where(VKUser.vk_id == vk_id)
+            )
+            if existing.scalar_one_or_none():
+                self._seen_vk_users.add(vk_id)
+                return False
+
+            session.add(VKUser(vk_id=vk_id))
+            await session.commit()
+            self._seen_vk_users.add(vk_id)
+            return True
+        except Exception as e:
+            await session.rollback()
+            print(f"⚠️ Ошибка регистрации пользователя VK: {e}")
+            if vk_id in self._seen_vk_users:
+                return False
+            self._seen_vk_users.add(vk_id)
+            return True
         finally:
             await session.close()
 

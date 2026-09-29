@@ -107,3 +107,16 @@ class User(Base):
         return f"<User(telegram_id={self.telegram_id}, username='{self.username}', role='{self.role}')>"
 
 
+class VKUser(Base):
+    """Пользователь VK, которому уже отправлялось стартовое приветствие."""
+
+    __tablename__ = "vk_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    vk_id = Column(BigInteger, unique=True, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<VKUser(vk_id={self.vk_id})>"
+
+
