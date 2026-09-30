@@ -34,9 +34,9 @@ async def init_services():
 
     # Ициализация сервиса документов
     document_service = DocumentService(db=db, llm=llm)
-        repaired_files = await document_service.repair_missing_file_paths(Config.UPLOAD_DIR)
-        if repaired_files:
-            logger.info("Восстановлены пути к файлам документов: %s", repaired_files)
+    repaired_files = await document_service.repair_missing_file_paths(Config.UPLOAD_DIR)
+    if repaired_files:
+        logger.info("Восстановлены пути к файлам документов: %s", repaired_files)
 
     return db, document_service
 
