@@ -67,8 +67,8 @@ class DocumentService:
             "message": "",
         }
 
-        # Шаг 2: Если результатов мало, используем LLM для расширения
-        if len(sql_results) < Config.MIN_SEMANTIC_RESULTS:
+        # Шаг 2: Если результатов мало и LLM доступен, используем его для расширения
+        if len(sql_results) < Config.MIN_SEMANTIC_RESULTS and self.llm.enabled:
             synonyms = await self.llm.suggest_synonyms(query)
             result["llm_suggestions"] = synonyms
 
@@ -102,8 +102,11 @@ class DocumentService:
                 result["message"] = "❌ Документов не найдено. Попробуйте изменить запрос."
         else:
             result["all_results"] = sql_results
-            result["best_match"] = sql_results[0]
-            result["message"] = f"✅ Найдено {len(sql_results)} документов."
+            result["best_match"] = sql_results[0] if sql_results else None
+            result["message"] = (
+                f"✅ Найдено {len(sql_results)} документов."
+                if sql_results else "❌ Документов не найдено. Попробуйте изменить запрос."
+            )
 
         return result
 
@@ -277,8 +280,8 @@ class DocumentService:
         # Поиск релевантных документов
         docs = await self.db.fulltext_search(text)
 
-        # Если документов нет, пробуем через LLM найти синонимы
-        if not docs:
+        # Если документов нет и LLM доступен, пробуем найти синонимы
+        if not docs and self.llm.enabled:
             synonyms = await self.llm.suggest_synonyms(text)
             for synonym in synonyms:
                 if synonym.lower() != text.lower():
@@ -286,9 +289,11 @@ class DocumentService:
                     if docs:
                         break
 
-        # Формирование ответа через LLM
-        response = await self.llm.process_query(text, docs)
-        return response
+        # Формирование ответа через LLM, если он доступен
+        if self.llm.enabled:
+            response = await self.llm.process_query(text, docs)
+            return response
+        return self.llm._fallback_response(text, docs)
 
     async def import_documents_from_folder(self, folder: str) -> int:
         """Импортирует файлы из папки в индекс документов без использования бота."""

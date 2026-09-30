@@ -111,6 +111,73 @@ def test_process_message_handles_text_command():
     asyncio.run(exercise())
 
 
+def test_llm_falls_back_when_server_is_unavailable():
+    from services.llm_service import LLMProcessor
+
+    llm = LLMProcessor(api_url="http://127.0.0.1:1234/v1", model="qwen-3-4b")
+    try:
+        assert asyncio.run(llm.is_available()) is False
+        assert llm.enabled is False
+    finally:
+        asyncio.run(llm.close())
+
+
+def test_single_search_result_sends_document_file():
+    class FakeDoc:
+        def __init__(self):
+            self.doc_id = "DOC-1"
+            self.title = "Вал"
+            self.status = "Активен"
+            self.doc_type = "Чертеж"
+            self.file_name = "val.pdf"
+            self.file_path = "uploads/documents/val.pdf"
+
+    class FakeVKClient:
+        def __init__(self):
+            self.documents = []
+            self.messages = []
+
+        async def send_document(self, peer_id, content, file_name, title):
+            self.documents.append({"peer_id": peer_id, "content": content, "file_name": file_name, "title": title})
+
+        async def send_message(self, peer_id, message, attachment=None, keyboard=None):
+            self.messages.append({"peer_id": peer_id, "message": message, "keyboard": keyboard})
+
+    class FakeService:
+        def __init__(self):
+            self.doc = FakeDoc()
+
+            class FakeDB:
+                async def get_document_file(self, doc_id):
+                    return b"fake-pdf-content"
+
+            self.db = FakeDB()
+
+        async def search_documents(self, query):
+            return [self.doc]
+
+        async def smart_search(self, query):
+            return {"all_results": [self.doc], "message": "Найден документ", "llm_suggestions": []}
+
+    class FakeDB:
+        async def register_vk_user(self, vk_id):
+            return False
+
+    app = web.Application()
+    app["document_service"] = FakeService()
+    app["vk_client"] = FakeVKClient()
+    app["menu_state"] = NavStateManager()
+    app["db"] = FakeDB()
+    app["pending_uploads"] = {}
+
+    async def exercise():
+        await process_message(app, {"text": "поиск вал"}, 1, 2)
+
+    asyncio.run(exercise())
+    assert len(app["vk_client"].documents) == 1
+    assert app["vk_client"].documents[0]["file_name"] == "val.pdf"
+
+
 def test_vk_user_is_greeted_only_once(tmp_path):
     async def exercise():
         db = DocumentDatabase(f"sqlite+aiosqlite:///{tmp_path / 'vk-users.db'}")

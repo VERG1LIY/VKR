@@ -19,6 +19,8 @@ class Config:
     HOST: str = os.getenv("HOST", "127.0.0.1")
     PORT: int = int(os.getenv("PORT", "3000"))
     VK_CALLBACK_PATH: str = os.getenv("VK_CALLBACK_PATH", "/")
+    # Список администраторов, которым разрешены только специальные операции.
+    # Для загрузки документов всем пользователям текущее поведение: VK_ADMIN_IDS не блокирует open_upload.
     VK_ADMIN_IDS: tuple[int, ...] = tuple(
         int(item.strip()) for item in os.getenv("VK_ADMIN_IDS", "").split(",") if item.strip()
     )

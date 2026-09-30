@@ -418,6 +418,22 @@ async def process_message(
         if command == "start":
             await vk_client.send_message(peer_id, WELCOME_TEXT, keyboard=build_main_menu_keyboard())
             return
+        if command in {"search", "smart"} and text:
+            if command == "search":
+                docs = await app["document_service"].search_documents(text)
+            else:
+                result = await app["document_service"].smart_search(text)
+                docs = result.get("all_results") or []
+            if docs and len(docs) == 1:
+                sent = await _send_document_by_doc(app, vk_client, peer_id, docs[0])
+                if sent:
+                    await vk_client.send_message(
+                        peer_id,
+                        f"Найден документ: {docs[0].doc_id} — {docs[0].title}",
+                        keyboard=build_navigation_keyboard(),
+                    )
+                    return
+
         if current in {"search", "smart_search"} and text:
             if current == "search":
                 docs = await app["document_service"].search_documents(text)
@@ -504,12 +520,12 @@ async def handle_vk_action(
         return
 
     if action == "open_upload":
-        admin_ids = set(Config.VK_ADMIN_IDS)
-        if admin_ids and str(sender_id) not in {str(item) for item in admin_ids}:
-            await vk_client.send_message(peer_id, "Загрузка документов доступна только администраторам.")
-            return
         state.push(sender_id, "upload_waiting")
-        await vk_client.send_message(peer_id, "Отправьте один файл документа. Я проверю формат, сохраню и добавлю в архив.", keyboard=build_navigation_keyboard())
+        await vk_client.send_message(
+            peer_id,
+            "Отправьте один файл документа. Я проверю формат, сохраню и добавлю в архив.",
+            keyboard=build_navigation_keyboard(),
+        )
         return
 
     if action == "confirm_upload":
@@ -606,6 +622,22 @@ async def _show_document_list(
     )
 
 
+async def _send_document_by_doc(
+    app: web.Application,
+    vk_client: VKAPIClient,
+    peer_id: int,
+    doc: Any,
+) -> bool:
+    if not doc or not getattr(doc, "file_path", None):
+        return False
+    file_data = await app["document_service"].db.get_document_file(doc.doc_id)
+    if not file_data:
+        return False
+    file_name = getattr(doc, "file_name", None) or f"{doc.doc_id}.pdf"
+    await vk_client.send_document(peer_id, file_data, file_name, f"{doc.doc_id} — {doc.title}")
+    return True
+
+
 async def _show_document_card(
     service: DocumentService,
     vk_client: VKAPIClient,
@@ -627,6 +659,10 @@ async def _show_document_card(
         f"Теги: {info.get('tags') or 'нет'}\n"
         f"Описание: {info.get('description') or 'нет'}"
     )
+    file_data = await service.download_document(doc_id)
+    if file_data:
+        content, file_name = file_data
+        await vk_client.send_document(peer_id, content, file_name, f"{doc_id} — {file_name}")
     keyboard = {
         "one_time": False,
         "buttons": [

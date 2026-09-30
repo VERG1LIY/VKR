@@ -30,8 +30,10 @@ async def init_services():
         api_url=Config.LLM_API_URL,
         model=Config.LLM_MODEL
     )
+    if not await llm.is_available():
+        logger.warning("LM Studio недоступен по адресу %s; бот будет работать без ИИ.", Config.LLM_API_URL)
 
-    # Инициализация сервиса документов
+    # Ициализация сервиса документов
     document_service = DocumentService(db=db, llm=llm)
 
     return db, document_service

@@ -27,7 +27,30 @@ class LLMProcessor:
         """
         self.api_url = api_url or Config.LLM_API_URL
         self.model = model or Config.LLM_MODEL
+        self.enabled = True
+        self._last_connection_error: Optional[str] = None
+        self._warned_about_unavailability = False
         self._session: Optional[aiohttp.ClientSession] = None
+
+    async def is_available(self) -> bool:
+        """Проверяет доступность локального LM Studio."""
+        if not self.api_url:
+            self.enabled = False
+            return False
+        try:
+            session = await self._get_session()
+            async with session.get(
+                f"{self.api_url.rstrip('/')}/models",
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as response:
+                if response.status == 200:
+                    self.enabled = True
+                    self._last_connection_error = None
+                    return True
+        except Exception as exc:
+            self._last_connection_error = str(exc)
+        self.enabled = False
+        return False
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Получение HTTP сессии (создание при первом вызове)."""
@@ -51,6 +74,9 @@ class LLMProcessor:
         Returns:
             Текст ответа или None при ошибке.
         """
+        if not self.enabled:
+            return None
+
         try:
             session = await self._get_session()
 
@@ -71,14 +97,23 @@ class LLMProcessor:
                     data = await response.json()
                     return data["choices"][0]["message"]["content"]
                 else:
-                    print(f"⚠️ LLM API ошибка: статус {response.status}")
+                    self.enabled = False
+                    if not self._warned_about_unavailability:
+                        print(f"⚠️ LLM API недоступен: статус {response.status}")
+                        self._warned_about_unavailability = True
                     return None
 
         except asyncio.TimeoutError:
-            print("⚠️ LLM API таймаут (120 сек)")
+            self.enabled = False
+            if not self._warned_about_unavailability:
+                print("⚠️ LLM API таймаут (120 сек); используется режим без ИИ.")
+                self._warned_about_unavailability = True
             return None
         except Exception as e:
-            print(f"⚠️ LLM API ошибка: {e}")
+            self.enabled = False
+            if not self._warned_about_unavailability:
+                print(f"⚠️ LLM API недоступен: {e}")
+                self._warned_about_unavailability = True
             return None
 
     async def process_query(
