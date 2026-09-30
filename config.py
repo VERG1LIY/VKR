@@ -31,7 +31,7 @@ class Config:
     )
 
     # LLM (LM Studio)
-    LLM_API_URL: str = os.getenv("LLM_API_URL", "http://localhost:1234/v1")
+    LLM_API_URL: str = os.getenv("LLM_API_URL", "http://127.0.0.1:60969/v1")
     LLM_MODEL: str = os.getenv("LLM_MODEL", "qwen-3-4b")
 
     # Файлы

@@ -327,6 +327,29 @@ class DocumentDatabase:
         """
         return await self.update_status(doc_id, "Архивный", user)
 
+    async def get_all_tags(self) -> List[str]:
+        """Возвращает список всех тегов, используемых в документах."""
+        session = await self.get_session()
+        if not session:
+            return []
+
+        try:
+            result = await session.execute(select(Document.tags))
+            tags = set()
+            for row in result.scalars().all():
+                if not row:
+                    continue
+                for tag in str(row).split(","):
+                    cleaned = tag.strip()
+                    if cleaned:
+                        tags.add(cleaned)
+            return sorted(tags)
+        except Exception as e:
+            print(f"⚠️ Ошибка получения тегов: {e}")
+            return []
+        finally:
+            await session.close()
+
     async def get_statistics(self) -> Dict[str, Any]:
         """
         Получение статистики по архиву документов.

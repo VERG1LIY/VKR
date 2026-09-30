@@ -121,9 +121,8 @@ def build_navigation_keyboard() -> Dict[str, Any]:
 
 def build_filter_menu_keyboard() -> Dict[str, Any]:
     buttons = [
-        [_button("📄 По типу", "filter_mode", filter_name="doc_type"), _button("📊 По статусу", "filter_mode", filter_name="status")],
-        [_button("🔧 По техпроцессу", "filter_mode", filter_name="tech_process"), _button("◀️ Назад", "back")],
-        [_button("🏠 Главное меню", "main_menu")],
+        [_button("🏷 Все теги", "filter_mode", filter_name="tags")],
+        [_button("◀️ Назад", "back"), _button("🏠 Главное меню", "main_menu")],
     ]
     return {"one_time": False, "buttons": buttons}
 
@@ -262,26 +261,17 @@ async def dispatch_text_command(
         await vk_client.send_document(peer_id, content, file_name, f"{doc_id} — {file_name}")
         return "Файл отправлен."
     if command == "filter":
-        filter_text = argument.strip() if argument else normalized_text
+        filter_text = argument.strip() if argument else ""
         if not filter_text:
-            return "Формат: фильтр тип значение или фильтр статус Активен"
-        parts = filter_text.split(maxsplit=1)
-        if len(parts) == 2:
-            key, value = parts
-        else:
-            return "Формат: фильтр тип значение или фильтр статус Активен"
-        mapping = {
-            "тип": "doc_type",
-            "doc_type": "doc_type",
-            "статус": "status",
-            "status": "status",
-            "техпроцесс": "tech_process",
-            "tech_process": "tech_process",
-        }
-        criteria = mapping.get(key.lower(), key.lower())
-        kwargs = {criteria: value.strip()}
-        docs = await service.filter_documents(**kwargs)
-        return _format_documents(docs, f"Результаты фильтрации: {len(docs)}")
+            tags = await service.get_available_tags()
+            if not tags:
+                return "В базе пока нет тегов у документов."
+            return "Доступные теги:\n- " + "\n- ".join(tags)
+
+        docs = await service.filter_documents(tags=filter_text)
+        if not docs:
+            return f"По тегу '{filter_text}' документов не найдено."
+        return _format_documents(docs, f"Документы по тегу '{filter_text}': {len(docs)}")
     if command == "stats":
         stats = await service.get_statistics()
         return _format_counts(stats)
@@ -320,7 +310,15 @@ async def dispatch_text_command(
         return f"✅ Документ добавлен: {document.doc_id} — {document.title}"
 
     if normalized_text:
-        return await service.process_free_text(normalized_text)
+        return (
+            "Неизвестная команда. Используйте:\n"
+            "поиск <текст> — поиск по документам\n"
+            "умный поиск <текст> — поиск через LM Studio\n"
+            "фильтр — список тегов\n"
+            "список — список документов\n"
+            "загрузить — добавить документ\n"
+            "меню — главное меню"
+        )
     return "Введите команду или запрос."
 
 
@@ -506,6 +504,14 @@ async def handle_vk_action(
     if action == "filter_mode":
         filter_name = payload.get("filter_name")
         state.push(sender_id, f"filter:{filter_name}")
+        if filter_name == "tags":
+            tags = await service.get_available_tags()
+            if not tags:
+                await vk_client.send_message(peer_id, "В базе пока нет тегов у документов.", keyboard=build_navigation_keyboard())
+                return
+            text = "Доступные теги:\n- " + "\n- ".join(tags)
+            await vk_client.send_message(peer_id, text, keyboard=build_navigation_keyboard())
+            return
         await vk_client.send_message(peer_id, f"Для фильтрации по {filter_name} введите значение после команды или просто напишите его в чат.", keyboard=build_navigation_keyboard())
         return
 

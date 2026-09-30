@@ -112,7 +112,7 @@ class DocumentService:
 
     async def filter_documents(
         self, doc_type: str = None, status: str = None,
-        tech_process: str = None
+        tech_process: str = None, tags: str = None
     ) -> List[Document]:
         """
         Фильтрация документов по критериям.
@@ -121,10 +121,15 @@ class DocumentService:
             doc_type: Тип документа.
             status: Статус документа.
             tech_process: Техпроцесс.
+            tags: Тег документа.
 
         Returns:
             Список отфильтрованных документов.
         """
+        if tags:
+            docs = await self.db.fulltext_search(tags)
+            return [doc for doc in docs if doc.tags and any(tag.strip().lower() == tags.strip().lower() for tag in doc.tags.split(","))]
+
         filters = {}
         if doc_type:
             filters["doc_type"] = doc_type
@@ -134,6 +139,10 @@ class DocumentService:
             filters["tech_process"] = tech_process
 
         return await self.db.search_by_criteria(filters)
+
+    async def get_available_tags(self) -> List[str]:
+        """Возвращает список всех тегов, связанных с документами."""
+        return await self.db.get_all_tags()
 
     async def get_document_info(self, doc_id: str) -> Optional[Dict[str, Any]]:
         """
