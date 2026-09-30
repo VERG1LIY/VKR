@@ -1,7 +1,6 @@
 """Запуск системы документооборота через VK Callback API."""
 import os
 import asyncio
-from contextlib import suppress
 
 from aiohttp import web
 
@@ -35,18 +34,11 @@ async def init_services():
 
     # Ициализация сервиса документов
     document_service = DocumentService(db=db, llm=llm)
+        repaired_files = await document_service.repair_missing_file_paths(Config.UPLOAD_DIR)
+        if repaired_files:
+            logger.info("Восстановлены пути к файлам документов: %s", repaired_files)
 
     return db, document_service
-
-
-async def schedule_folder_import(document_service: DocumentService):
-    """Периодически импортирует новые файлы из папки хранения."""
-    while True:
-        try:
-            await document_service.import_documents_from_folder(Config.UPLOAD_DIR)
-        except Exception as exc:
-            logger.error(f"Ошибка автоимпорта: {exc}")
-        await asyncio.sleep(300)
 
 
 async def main():
@@ -69,7 +61,6 @@ async def main():
     vk_client = VKAPIClient(Config.VK_ACCESS_TOKEN, Config.VK_API_VERSION)
     app = create_vk_app(db, document_service, vk_client)
     runner = web.AppRunner(app)
-    import_task = None
     try:
         await runner.setup()
         site = web.TCPSite(runner, Config.HOST, Config.PORT)
@@ -78,13 +69,8 @@ async def main():
         callback_url = f"{public_path}/" if public_path else "/"
         logger.info("VK Callback endpoint слушает %s:%s%s", Config.HOST, Config.PORT, callback_url)
         print(f"VK Callback-бот запущен на {Config.HOST}:{Config.PORT}{callback_url}")
-        import_task = asyncio.create_task(schedule_folder_import(document_service))
         await asyncio.Event().wait()
     finally:
-        if import_task:
-            import_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await import_task
         await runner.cleanup()
         await vk_client.close()
         await db.close()

@@ -55,7 +55,7 @@ class FileService:
             Путь к сохраненному файлу или None при ошибке.
         """
         try:
-            upload_dir = Config.UPLOAD_DIR
+            upload_dir = os.path.abspath(Config.UPLOAD_DIR)
             os.makedirs(upload_dir, exist_ok=True)
 
             # Генерация уникального имени

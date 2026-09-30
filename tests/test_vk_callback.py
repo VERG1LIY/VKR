@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -12,7 +13,10 @@ from handlers.vk_callback import (
     parse_payload,
     build_payload,
     process_message,
+    persist_pending_upload,
+    handle_vk_action,
 )
+from services.document_service import DocumentService
 
 
 def test_parse_vk_text_commands_and_arguments():
@@ -178,6 +182,50 @@ def test_single_search_result_sends_document_file():
     assert app["vk_client"].documents[0]["file_name"] == "val.pdf"
 
 
+def test_multiple_search_results_have_document_action_buttons():
+    class FakeDoc:
+        def __init__(self, doc_id, title):
+            self.doc_id = doc_id
+            self.title = title
+            self.status = "Активен"
+            self.doc_type = "Чертеж"
+
+    class FakeVKClient:
+        def __init__(self):
+            self.messages = []
+
+        async def send_message(self, peer_id, message, attachment=None, keyboard=None):
+            self.messages.append({"message": message, "keyboard": keyboard})
+
+    class FakeService:
+        async def search_documents(self, query):
+            assert query == "вал"
+            return [FakeDoc("DOC-1", "Вал 1"), FakeDoc("DOC-2", "Вал 2")]
+
+    class FakeDB:
+        async def register_vk_user(self, vk_id):
+            return False
+
+    app = web.Application()
+    app["document_service"] = FakeService()
+    app["vk_client"] = FakeVKClient()
+    app["menu_state"] = NavStateManager()
+    app["db"] = FakeDB()
+
+    async def exercise():
+        await process_message(app, {"text": "поиск вал"}, 1, 2)
+
+    asyncio.run(exercise())
+    keyboard = app["vk_client"].messages[-1]["keyboard"]
+    payloads = [
+        parse_payload(button["action"]["payload"])
+        for row in keyboard["buttons"]
+        for button in row
+    ]
+    assert {"action": "open_document", "doc_id": "DOC-1"} in payloads
+    assert {"action": "open_document", "doc_id": "DOC-2"} in payloads
+
+
 def test_vk_user_is_greeted_only_once(tmp_path):
     async def exercise():
         db = DocumentDatabase(f"sqlite+aiosqlite:///{tmp_path / 'vk-users.db'}")
@@ -189,5 +237,203 @@ def test_vk_user_is_greeted_only_once(tmp_path):
         fallback_db = DocumentDatabase()
         assert await fallback_db.register_vk_user(123456789) is True
         assert await fallback_db.register_vk_user(123456789) is False
+
+    asyncio.run(exercise())
+
+
+def test_relative_database_path_is_resolved_to_project_root(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///documents.db")
+    import importlib
+    import config
+
+    importlib.reload(config)
+    db_url = config.Config.DATABASE_URL
+    assert db_url.startswith("sqlite+aiosqlite:///")
+    db_path = db_url.split("sqlite+aiosqlite:///", 1)[1]
+    assert os.path.isabs(db_path)
+
+
+def test_pending_upload_is_saved_to_database(tmp_path, monkeypatch):
+    async def exercise():
+        monkeypatch.setattr(Config, "UPLOAD_DIR", str(tmp_path / "uploads"))
+        db = DocumentDatabase(f"sqlite+aiosqlite:///{tmp_path / 'uploads.db'}")
+        await db.initialize()
+        service = DocumentService(db=db)
+        app = web.Application()
+        app["document_service"] = service
+        app["pending_uploads"] = {
+            123: {
+                "file_name": "specification.pdf",
+                "file_bytes": b"pdf-bytes",
+                "file_hash": "abc123",
+            }
+        }
+        result = await persist_pending_upload(app, 123, 456)
+        assert "сохранён" in result.lower()
+        assert await db.get_total_count() == 1
+        await db.close()
+
+    asyncio.run(exercise())
+
+
+def test_upload_button_flow_stores_retrievable_document_file(tmp_path, monkeypatch):
+    async def exercise():
+        monkeypatch.setattr(Config, "UPLOAD_DIR", str(tmp_path / "documents"))
+        db = DocumentDatabase(f"sqlite+aiosqlite:///{tmp_path / 'button-upload.db'}")
+        await db.initialize()
+        service = DocumentService(db=db)
+
+        class FakeVKClient:
+            def __init__(self):
+                self.messages = []
+
+            async def send_message(self, peer_id, message, attachment=None, keyboard=None):
+                self.messages.append({"message": message, "keyboard": keyboard})
+
+            async def download_attachment(self, attachment):
+                return b"uploaded-pdf-bytes"
+
+        vk_client = FakeVKClient()
+        app = web.Application()
+        app["document_service"] = service
+        app["vk_client"] = vk_client
+        app["menu_state"] = NavStateManager()
+        app["pending_uploads"] = {}
+
+        await handle_vk_action(app, 123, 123, "open_upload")
+        assert app["menu_state"].current(123) == "upload_waiting"
+
+        await process_message(
+            app,
+            {"text": "", "attachments": [{"type": "doc", "doc": {"title": "spec.pdf"}}]},
+            123,
+            123,
+        )
+        assert app["menu_state"].current(123) == "upload_confirm"
+
+        await handle_vk_action(app, 123, 123, "confirm_upload")
+        docs = await db.get_all_documents(1, 10)
+        assert len(docs) == 1
+        assert docs[0].file_path
+        assert os.path.isfile(docs[0].file_path)
+        assert await service.download_document(docs[0].doc_id) == (
+            b"uploaded-pdf-bytes",
+            "spec.pdf",
+        )
+        await db.close()
+
+    asyncio.run(exercise())
+
+
+def test_filter_tag_button_applies_database_filter():
+    async def exercise():
+        class FakeDoc:
+            doc_id = "DOC-TAG"
+            title = "Проверочный документ"
+            status = "Активен"
+            doc_type = "Чертеж"
+
+        class FakeService:
+            def __init__(self):
+                self.filtered_tag = None
+
+            async def get_available_tags(self):
+                return ["насос", "вал"]
+
+            async def filter_documents(self, tags=None):
+                self.filtered_tag = tags
+                return [FakeDoc()]
+
+        class FakeVKClient:
+            def __init__(self):
+                self.messages = []
+
+            async def send_message(self, peer_id, message, attachment=None, keyboard=None):
+                self.messages.append({"message": message, "keyboard": keyboard})
+
+        service = FakeService()
+        vk_client = FakeVKClient()
+        app = web.Application()
+        app["document_service"] = service
+        app["vk_client"] = vk_client
+        app["menu_state"] = NavStateManager()
+
+        await handle_vk_action(app, 123, 123, "filter_mode", {"filter_name": "tags"})
+        keyboard = vk_client.messages[-1]["keyboard"]
+        tag_buttons = [button for row in keyboard["buttons"] for button in row]
+        tag_payloads = [parse_payload(button["action"]["payload"]) for button in tag_buttons]
+        assert any(item == {"action": "filter_tag", "tag": "насос"} for item in tag_payloads)
+
+        await handle_vk_action(app, 123, 123, "filter_tag", {"tag": "насос"})
+        assert service.filtered_tag == "насос"
+        assert "Проверочный документ" in vk_client.messages[-1]["message"]
+
+    asyncio.run(exercise())
+
+
+def test_folder_import_repairs_legacy_file_and_is_idempotent(tmp_path):
+    async def exercise():
+        source = tmp_path / "source"
+        source.mkdir()
+        source_file = source / "part.pdf"
+        source_file.write_bytes(b"existing-pdf")
+
+        db = DocumentDatabase(f"sqlite+aiosqlite:///{tmp_path / 'folder-import.db'}")
+        await db.initialize()
+        await db.add_document(
+            {
+                "doc_id": "DOC-FS-OLD",
+                "title": "part",
+                "file_name": "part.pdf",
+                "file_path": None,
+                "tags": "imported",
+            }
+        )
+        service = DocumentService(db=db)
+
+        assert await service.import_documents_from_folder(str(source)) == 0
+        assert await db.get_total_count() == 1
+        document = await db.get_document_by_id("DOC-FS-OLD")
+        assert document.file_path == str(source_file)
+        assert await service.download_document("DOC-FS-OLD") == (
+            b"existing-pdf",
+            "part.pdf",
+        )
+        assert await service.import_documents_from_folder(str(source)) == 0
+        assert await db.get_total_count() == 1
+        docs, total = await service.get_document_list(page=1, per_page=10)
+        assert len(docs) == total == 1
+        await db.close()
+
+    asyncio.run(exercise())
+
+
+def test_startup_repair_links_only_existing_database_records(tmp_path):
+    async def exercise():
+        upload_dir = tmp_path / "documents"
+        upload_dir.mkdir()
+        indexed_file = upload_dir / "indexed.pdf"
+        indexed_file.write_bytes(b"indexed-content")
+        (upload_dir / "unindexed.pdf").write_bytes(b"unindexed-content")
+
+        db = DocumentDatabase(f"sqlite+aiosqlite:///{tmp_path / 'repair.db'}")
+        await db.initialize()
+        await db.add_document(
+            {
+                "doc_id": "DOC-FS-LEGACY",
+                "title": "indexed",
+                "file_name": "indexed.pdf",
+                "file_path": None,
+            }
+        )
+        service = DocumentService(db=db)
+
+        assert await service.repair_missing_file_paths(str(upload_dir)) == 1
+        assert await db.get_total_count() == 1
+        assert await service.download_document("DOC-FS-LEGACY") == (
+            b"indexed-content",
+            "indexed.pdf",
+        )
+        await db.close()
 
     asyncio.run(exercise())

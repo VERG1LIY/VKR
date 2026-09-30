@@ -127,6 +127,26 @@ def build_filter_menu_keyboard() -> Dict[str, Any]:
     return {"one_time": False, "buttons": buttons}
 
 
+def build_tag_keyboard(tags: List[str], page: int = 1, per_page: int = 20) -> Dict[str, Any]:
+    total_pages = max((len(tags) + per_page - 1) // per_page, 1)
+    page = min(max(page, 1), total_pages)
+    start = (page - 1) * per_page
+    visible_tags = tags[start : start + per_page]
+    buttons = [
+        [_button(tag[:40], "filter_tag", tag=tag)]
+        for tag in visible_tags
+    ]
+    navigation = []
+    if page > 1:
+        navigation.append(_button("⬅️", "filter_tags_page", page=page - 1))
+    if page < total_pages:
+        navigation.append(_button("➡️", "filter_tags_page", page=page + 1))
+    if navigation:
+        buttons.append(navigation)
+    buttons.append([_button("◀️ Назад", "back"), _button("🏠 Главное меню", "main_menu")])
+    return {"one_time": False, "buttons": buttons}
+
+
 def build_document_list_keyboard(page: int, total_pages: int, docs: Optional[List[Any]] = None) -> Dict[str, Any]:
     buttons: List[List[Dict[str, Any]]] = []
     if docs:
@@ -141,6 +161,15 @@ def build_document_list_keyboard(page: int, total_pages: int, docs: Optional[Lis
         nav.append(_button("➡️", "list_page", page=page + 1))
     if nav:
         buttons.append(nav)
+    buttons.append([_button("◀️ Назад", "back"), _button("🏠 Главное меню", "main_menu")])
+    return {"one_time": False, "buttons": buttons}
+
+
+def build_document_results_keyboard(docs: List[Any]) -> Dict[str, Any]:
+    buttons = [
+        [_button(f"{doc.doc_id} — {doc.title}"[:40], "open_document", doc_id=doc.doc_id)]
+        for doc in docs[:10]
+    ]
     buttons.append([_button("◀️ Назад", "back"), _button("🏠 Главное меню", "main_menu")])
     return {"one_time": False, "buttons": buttons}
 
@@ -416,35 +445,50 @@ async def process_message(
         if command == "start":
             await vk_client.send_message(peer_id, WELCOME_TEXT, keyboard=build_main_menu_keyboard())
             return
-        if command in {"search", "smart"} and text:
+        if current == "upload_waiting":
+            await vk_client.send_message(
+                peer_id,
+                "Ожидаю файл документа. Прикрепите PDF, DOCX или DWG к сообщению.",
+                keyboard=build_navigation_keyboard(),
+            )
+            return
+
+        if current in {"search", "smart_search"} and text:
+            command = current
+            argument = text
+        if command in {"search", "smart"}:
+            argument = argument or ""
+            command = "smart_search" if command == "smart" else "search"
+
+        if command in {"search", "smart_search"} and argument:
             if command == "search":
-                docs = await app["document_service"].search_documents(text)
+                docs = await app["document_service"].search_documents(argument)
+                result_text = _format_documents(docs, f"Результаты поиска: {len(docs)}")
             else:
-                result = await app["document_service"].smart_search(text)
-                docs = result.get("all_results") or []
+                result = await app["document_service"].smart_search(argument)
+                docs = result.get("all_results", [])
+                result_text = _format_documents(
+                    docs, result.get("message", "Результаты поиска"),
+                    result.get("llm_suggestions"),
+                )
+
             if docs and len(docs) == 1:
                 sent = await _send_document_by_doc(app, vk_client, peer_id, docs[0])
                 if sent:
-                    await vk_client.send_message(
-                        peer_id,
-                        f"Найден документ: {docs[0].doc_id} — {docs[0].title}",
-                        keyboard=build_navigation_keyboard(),
-                    )
-                    return
+                    result_text = f"Найден документ: {docs[0].doc_id} — {docs[0].title}"
+            keyboard = (
+                build_document_results_keyboard(docs)
+                if len(docs) > 1 else build_navigation_keyboard()
+            )
+            await vk_client.send_message(peer_id, result_text, keyboard=keyboard)
+            return
 
-        if current in {"search", "smart_search"} and text:
-            if current == "search":
-                docs = await app["document_service"].search_documents(text)
-                await vk_client.send_message(
-                    peer_id,
-                    _format_documents(docs, f"Результаты поиска: {len(docs)}"),
-                    keyboard=build_navigation_keyboard(),
-                )
-                return
-            result = await app["document_service"].smart_search(text)
+        if current.startswith("filter:") and text:
+            tag = text.strip()
+            docs = await app["document_service"].filter_documents(tags=tag)
             await vk_client.send_message(
                 peer_id,
-                _format_documents(result["all_results"], result["message"], result.get("llm_suggestions")),
+                _format_documents(docs, f"Документы по тегу '{tag}': {len(docs)}"),
                 keyboard=build_navigation_keyboard(),
             )
             return
@@ -498,7 +542,16 @@ async def handle_vk_action(
 
     if action == "open_filters":
         state.push(sender_id, "filters")
-        await vk_client.send_message(peer_id, "Выберите критерий фильтрации:", keyboard=build_filter_menu_keyboard())
+        tags = await service.get_available_tags()
+        if not tags:
+            await vk_client.send_message(
+                peer_id, "В базе пока нет тегов у документов.",
+                keyboard=build_navigation_keyboard(),
+            )
+            return
+        await vk_client.send_message(
+            peer_id, "Выберите тег:", keyboard=build_tag_keyboard(tags)
+        )
         return
 
     if action == "filter_mode":
@@ -509,10 +562,32 @@ async def handle_vk_action(
             if not tags:
                 await vk_client.send_message(peer_id, "В базе пока нет тегов у документов.", keyboard=build_navigation_keyboard())
                 return
-            text = "Доступные теги:\n- " + "\n- ".join(tags)
-            await vk_client.send_message(peer_id, text, keyboard=build_navigation_keyboard())
+            await vk_client.send_message(
+                peer_id, "Выберите тег:", keyboard=build_tag_keyboard(tags)
+            )
             return
         await vk_client.send_message(peer_id, f"Для фильтрации по {filter_name} введите значение после команды или просто напишите его в чат.", keyboard=build_navigation_keyboard())
+        return
+
+    if action == "filter_tags_page":
+        tags = await service.get_available_tags()
+        page = int(payload.get("page", 1))
+        await vk_client.send_message(
+            peer_id, "Выберите тег:", keyboard=build_tag_keyboard(tags, page=page)
+        )
+        return
+
+    if action == "filter_tag":
+        tag = str(payload.get("tag", "")).strip()
+        if not tag:
+            await vk_client.send_message(peer_id, "Не выбран тег для фильтрации.")
+            return
+        docs = await service.filter_documents(tags=tag)
+        await vk_client.send_message(
+            peer_id,
+            _format_documents(docs, f"Документы по тегу '{tag}': {len(docs)}"),
+            keyboard=build_document_list_keyboard(1, 1, docs),
+        )
         return
 
     if action == "open_document_list":
@@ -762,7 +837,7 @@ async def persist_pending_upload(app: web.Application, sender_id: int, peer_id: 
         },
     }
 
-    document = await service.add_new_document(doc_data, file_content=file_bytes, user=str(sender_id))
+    document = await service.add_new_document(doc_data, file_content=None, user=str(sender_id))
     if not document:
         return "Файл сохранён, но не удалось добавить запись в БД. Проверьте данные документа."
     return f"✅ Документ сохранён: {document.doc_id} — {document.title}"

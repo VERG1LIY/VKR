@@ -32,11 +32,25 @@ class DocumentDatabase:
         Args:
             db_url: URL подключения к БД. Если None, используется из Config.
         """
-        self.db_url = db_url or Config.DATABASE_URL
+        self.db_url = self._normalize_db_url(db_url or Config.DATABASE_URL)
         self._engine = None
         self._session_factory = None
         self._fallback_storage: Dict[str, Dict] = {}  # JSON fallback хранилище
         self._seen_vk_users = set()
+
+    @staticmethod
+    def _normalize_db_url(db_url: str) -> str:
+        if not db_url:
+            return db_url
+
+        for prefix in ("sqlite+aiosqlite:///", "sqlite:///"):
+            if db_url.startswith(prefix):
+                raw_path = db_url[len(prefix):]
+                if raw_path and not os.path.isabs(raw_path):
+                    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    raw_path = os.path.abspath(os.path.join(project_root, raw_path))
+                return f"sqlite+aiosqlite:///{raw_path}"
+        return db_url
 
     async def initialize(self):
         """Инициализация движка БД и создание таблиц."""
@@ -181,7 +195,7 @@ class DocumentDatabase:
 
         try:
             # Сохранение файла, если он есть
-            file_path = None
+            file_path = data.get("file_path")
             if file_content and data.get("file_name"):
                 file_path = await self._save_file(file_content, data["file_name"])
 
@@ -349,6 +363,36 @@ class DocumentDatabase:
             return []
         finally:
             await session.close()
+
+    async def get_documents_by_tag(self, tag: str) -> List[Document]:
+        """Ищет документы, у которых тег совпадает полностью."""
+        normalized_tag = (tag or "").strip().lower()
+        if not normalized_tag:
+            return []
+
+        session = await self.get_session()
+        if not session:
+            documents = list(self._fallback_storage.values())
+        else:
+            try:
+                result = await session.execute(
+                    select(Document).where(Document.tags.is_not(None))
+                    .order_by(Document.updated_at.desc())
+                )
+                documents = list(result.scalars().all())
+            except Exception as e:
+                print(f"⚠️ Ошибка фильтрации по тегу: {e}")
+                return []
+            finally:
+                await session.close()
+
+        return [
+            document for document in documents
+            if any(
+                item.strip().lower() == normalized_tag
+                for item in (document.tags or "").split(",")
+            )
+        ][:Config.SEARCH_LIMIT]
 
     async def get_statistics(self) -> Dict[str, Any]:
         """

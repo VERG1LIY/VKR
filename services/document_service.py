@@ -40,7 +40,7 @@ class DocumentService:
         Returns:
             Список найденных документов.
         """
-        return await self.db.fulltext_search(query)
+        return self._deduplicate_folder_imports(await self.db.fulltext_search(query))
 
     async def smart_search(self, query: str) -> Dict[str, Any]:
         """
@@ -56,7 +56,9 @@ class DocumentService:
             Словарь с результатами поиска и пояснением.
         """
         # Шаг 1: SQL поиск
-        sql_results = await self.db.fulltext_search(query)
+        sql_results = self._deduplicate_folder_imports(
+            await self.db.fulltext_search(query)
+        )
 
         result = {
             "query": query,
@@ -76,7 +78,9 @@ class DocumentService:
             expanded_ids = set()
             for synonym in synonyms:
                 if synonym.lower() != query.lower():
-                    docs = await self.db.fulltext_search(synonym)
+                    docs = self._deduplicate_folder_imports(
+                        await self.db.fulltext_search(synonym)
+                    )
                     for doc in docs:
                         if doc.doc_id not in expanded_ids:
                             expanded_ids.add(doc.doc_id)
@@ -127,8 +131,9 @@ class DocumentService:
             Список отфильтрованных документов.
         """
         if tags:
-            docs = await self.db.fulltext_search(tags)
-            return [doc for doc in docs if doc.tags and any(tag.strip().lower() == tags.strip().lower() for tag in doc.tags.split(","))]
+            return self._deduplicate_folder_imports(
+                await self.db.get_documents_by_tag(tags)
+            )
 
         filters = {}
         if doc_type:
@@ -272,9 +277,24 @@ class DocumentService:
         Returns:
             Кортеж (список документов, общее количество).
         """
-        docs = await self.db.get_all_documents(page, per_page)
-        total = await self.db.get_total_count()
-        return docs, total
+        all_docs = await self.db.get_all_documents(page=1, per_page=10000)
+        unique_docs = self._deduplicate_folder_imports(all_docs)
+        start = (max(page, 1) - 1) * per_page
+        return unique_docs[start : start + per_page], len(unique_docs)
+
+    @staticmethod
+    def _deduplicate_folder_imports(documents: List[Document]) -> List[Document]:
+        """Скрывает повторные записи, созданные старым периодическим импортом."""
+        unique_documents = []
+        seen_imports = set()
+        for document in documents:
+            if document.doc_id.startswith("DOC-FS-") and document.file_name:
+                key = (document.title.casefold(), document.file_name.casefold())
+                if key in seen_imports:
+                    continue
+                seen_imports.add(key)
+            unique_documents.append(document)
+        return unique_documents
 
     async def process_free_text(self, text: str) -> str:
         """
@@ -321,6 +341,25 @@ class DocumentService:
             if not FileService.validate_file_extension(file_name):
                 continue
 
+            with open(path, "rb") as source_file:
+                file_hash = hashlib.sha256(source_file.read()).hexdigest()
+            duplicate = await self.db.find_duplicate_document(file_name, file_hash)
+            if duplicate:
+                if not duplicate.file_path:
+                    await self.db.update_document(
+                        duplicate.doc_id,
+                        {
+                            "file_path": os.path.abspath(path),
+                            "metadata_json": {
+                                **(duplicate.metadata_json or {}),
+                                "sha256": file_hash,
+                                "source": "folder_import",
+                            },
+                        },
+                        user="system",
+                    )
+                continue
+
             doc_id = f"DOC-FS-{datetime.now().strftime('%Y%m%d%H%M%S')}-{imported + 1:03d}"
             data = {
                 "doc_id": doc_id,
@@ -334,11 +373,57 @@ class DocumentService:
                 "file_name": file_name,
                 "tags": "imported",
                 "description": "Импортировано из папки хранения",
+                "metadata_json": {
+                    "sha256": file_hash,
+                    "source": "folder_import",
+                },
             }
-            await self.db.add_document(data, file_content=None, user="system")
-            imported += 1
+            if await self.db.add_document(data, file_content=None, user="system"):
+                imported += 1
 
         return imported
+
+    async def repair_missing_file_paths(self, folder: str) -> int:
+        """Связывает старые карточки автоимпорта с уже существующими файлами."""
+        if not folder:
+            return 0
+
+        root = folder if os.path.isabs(folder) else os.path.join(os.getcwd(), folder)
+        if not os.path.isdir(root):
+            return 0
+
+        documents = await self.db.get_all_documents(page=1, per_page=10000)
+        repaired = 0
+        seen_imports = set()
+        for document in documents:
+            if document.file_path or not document.file_name:
+                continue
+            if document.doc_id.startswith("DOC-FS-"):
+                key = (document.title.casefold(), document.file_name.casefold())
+                if key in seen_imports:
+                    continue
+                seen_imports.add(key)
+
+            file_path = os.path.abspath(os.path.join(root, document.file_name))
+            if not os.path.isfile(file_path):
+                continue
+
+            with open(file_path, "rb") as source_file:
+                file_hash = hashlib.sha256(source_file.read()).hexdigest()
+            success = await self.db.update_document(
+                document.doc_id,
+                {
+                    "file_path": file_path,
+                    "metadata_json": {
+                        **(document.metadata_json or {}),
+                        "sha256": file_hash,
+                    },
+                },
+                user="system",
+            )
+            repaired += int(success)
+
+        return repaired
 
     async def find_duplicate_document(
         self, file_name: str, file_hash: Optional[str] = None
@@ -363,3 +448,4 @@ class DocumentService:
 
 
 import os
+import hashlib
