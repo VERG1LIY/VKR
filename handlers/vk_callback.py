@@ -1,12 +1,16 @@
 """VK Callback API endpoint and text-command router."""
 import asyncio
+import hashlib
+import json
 import logging
-from typing import Any, Dict, Optional, Tuple
+import os
+from typing import Any, Dict, List, Optional, Tuple
 
 from aiohttp import web
 
 from config import Config
 from services.document_service import DocumentService
+from services.file_service import FileService
 from services.vk_api import VKAPIClient
 
 
@@ -29,6 +33,127 @@ WELCOME_TEXT = (
 )
 
 HELP_TEXT = WELCOME_TEXT.replace("Добро пожаловать! Я бот архива технической документации.\n\n", "")
+
+
+class NavStateManager:
+    """Хранит стек навигации по экранам для каждого пользователя VK."""
+
+    def __init__(self):
+        self._states: Dict[int, List[str]] = {}
+
+    def get(self, user_id: int) -> List[str]:
+        return self._states.setdefault(user_id, ["main"])
+
+    def current(self, user_id: int) -> str:
+        path = self.get(user_id)
+        return path[-1] if path else "main"
+
+    def push(self, user_id: int, screen: str) -> List[str]:
+        path = self.get(user_id)[:]
+        if path and path[-1] == screen:
+            return path
+        path.append(screen)
+        self._states[user_id] = path
+        return path
+
+    def back(self, user_id: int) -> str:
+        path = self.get(user_id)
+        if len(path) <= 1:
+            self._states[user_id] = ["main"]
+            return "main"
+        self._states[user_id] = path[:-1]
+        return self._states[user_id][-1]
+
+    def reset(self, user_id: int) -> List[str]:
+        self._states[user_id] = ["main"]
+        return self._states[user_id]
+
+
+def build_payload(action: str, **kwargs: Any) -> str:
+    payload: Dict[str, Any] = {"action": action}
+    payload.update(kwargs)
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def parse_payload(raw: Any) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return {}
+        if text.startswith("{"):
+            try:
+                return json.loads(text)
+            except (TypeError, ValueError):
+                return {"action": text}
+        return {"action": text}
+    return {"action": str(raw)}
+
+
+def _button(label: str, action: str, **kwargs: Any) -> Dict[str, Any]:
+    return {
+        "action": {
+            "type": "text",
+            "label": label,
+            "payload": build_payload(action, **kwargs),
+        }
+    }
+
+
+def build_main_menu_keyboard() -> Dict[str, Any]:
+    buttons = [
+        [_button("🔎 Поиск", "open_search"), _button("🧠 Умный поиск", "open_smart_search")],
+        [_button("🗂 Фильтр", "open_filters"), _button("📋 Список", "open_document_list")],
+        [_button("📤 Загрузить", "open_upload"), _button("🏠 Главное меню", "main_menu")],
+    ]
+    return {"one_time": False, "buttons": buttons}
+
+
+def build_navigation_keyboard() -> Dict[str, Any]:
+    buttons = [
+        [_button("◀️ Назад", "back"), _button("🏠 Главное меню", "main_menu")],
+    ]
+    return {"one_time": False, "buttons": buttons}
+
+
+def build_filter_menu_keyboard() -> Dict[str, Any]:
+    buttons = [
+        [_button("📄 По типу", "filter_mode", filter_name="doc_type"), _button("📊 По статусу", "filter_mode", filter_name="status")],
+        [_button("🔧 По техпроцессу", "filter_mode", filter_name="tech_process"), _button("◀️ Назад", "back")],
+        [_button("🏠 Главное меню", "main_menu")],
+    ]
+    return {"one_time": False, "buttons": buttons}
+
+
+def build_document_list_keyboard(page: int, total_pages: int, docs: Optional[List[Any]] = None) -> Dict[str, Any]:
+    buttons: List[List[Dict[str, Any]]] = []
+    if docs:
+        for doc in docs:
+            buttons.append([
+                _button(f"{doc.doc_id}", "open_document", doc_id=doc.doc_id),
+            ])
+    nav = []
+    if page > 1:
+        nav.append(_button("⬅️", "list_page", page=page - 1))
+    if page < total_pages:
+        nav.append(_button("➡️", "list_page", page=page + 1))
+    if nav:
+        buttons.append(nav)
+    buttons.append([_button("◀️ Назад", "back"), _button("🏠 Главное меню", "main_menu")])
+    return {"one_time": False, "buttons": buttons}
+
+
+def build_confirm_upload_keyboard() -> Dict[str, Any]:
+    return {
+        "one_time": False,
+        "buttons": [
+            [_button("✅ Сохранить", "confirm_upload"), _button("❌ Отмена", "cancel_upload")],
+            [_button("🏠 Главное меню", "main_menu")],
+        ],
+    }
 
 
 def parse_text_command(text: str) -> Tuple[str, str]:
@@ -72,7 +197,9 @@ def create_vk_app(
     app["db"] = db
     app["document_service"] = document_service
     app["vk_client"] = vk_client
+    app["menu_state"] = NavStateManager()
     app["tasks"] = set()
+    app["pending_uploads"] = {}
     callback_path = Config.VK_CALLBACK_PATH or "/"
     app.router.add_post(callback_path, handle_callback)
     app.router.add_get("/health", health_check)
@@ -97,6 +224,19 @@ async def handle_callback(request: web.Request) -> web.Response:
     event_type = payload.get("type")
     if event_type == "confirmation":
         return web.Response(text=Config.VK_CONFIRMATION_CODE)
+    if event_type == "message_event":
+        event_object = payload.get("object", {})
+        payload_data = parse_payload(event_object.get("payload"))
+        action = payload_data.get("action")
+        user_id = event_object.get("user_id")
+        peer_id = event_object.get("peer_id") or user_id
+        if action and user_id and peer_id:
+            task = asyncio.create_task(
+                handle_vk_action(request.app, int(user_id), int(peer_id), action, payload_data)
+            )
+            request.app["tasks"].add(task)
+            task.add_done_callback(request.app["tasks"].discard)
+        return web.Response(text="ok")
     if event_type == "message_new":
         event_object = payload.get("object", {})
         message = event_object.get("message", event_object)
@@ -116,16 +256,51 @@ async def process_message(
 ) -> None:
     vk_client: VKAPIClient = app["vk_client"]
     try:
-        is_first_message = await app["db"].register_vk_user(sender_id)
+        state = app["menu_state"]
         text = str(message.get("text", "")).strip()
+        attachments = message.get("attachments") or []
+        current = state.current(sender_id)
+
+        if current == "upload_waiting" and attachments:
+            response = await prepare_upload_document(app, sender_id, peer_id, attachments[0])
+            if response["status"] == "pending":
+                state.push(sender_id, "upload_confirm")
+                await vk_client.send_message(
+                    peer_id,
+                    response["text"],
+                    keyboard=build_confirm_upload_keyboard(),
+                )
+            else:
+                state.reset(sender_id)
+                await vk_client.send_message(peer_id, response["text"], keyboard=build_main_menu_keyboard())
+            return
+
+        is_first_message = await app["db"].register_vk_user(sender_id)
         command, argument = parse_text_command(text)
         if is_first_message:
-            await vk_client.send_message(peer_id, WELCOME_TEXT)
+            await vk_client.send_message(peer_id, WELCOME_TEXT, keyboard=build_main_menu_keyboard())
             if command in {"", "start", "help"}:
                 return
         if command == "start":
-            await vk_client.send_message(peer_id, WELCOME_TEXT)
+            await vk_client.send_message(peer_id, WELCOME_TEXT, keyboard=build_main_menu_keyboard())
             return
+        if current in {"search", "smart_search"} and text:
+            if current == "search":
+                docs = await app["document_service"].search_documents(text)
+                await vk_client.send_message(
+                    peer_id,
+                    _format_documents(docs, f"Результаты поиска: {len(docs)}"),
+                    keyboard=build_navigation_keyboard(),
+                )
+                return
+            result = await app["document_service"].smart_search(text)
+            await vk_client.send_message(
+                peer_id,
+                _format_documents(result["all_results"], result["message"], result.get("llm_suggestions")),
+                keyboard=build_navigation_keyboard(),
+            )
+            return
+
         response = await dispatch_text_command(
             app["document_service"], vk_client, peer_id, sender_id,
             command, argument, text
@@ -141,102 +316,287 @@ async def process_message(
             logger.exception("Не удалось отправить сообщение об ошибке в VK")
 
 
-async def dispatch_text_command(
+async def handle_vk_action(
+    app: web.Application,
+    sender_id: int,
+    peer_id: int,
+    action: str,
+    payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    state = app["menu_state"]
+    payload = payload or {}
+    vk_client: VKAPIClient = app["vk_client"]
+    service: DocumentService = app["document_service"]
+
+    if action == "main_menu":
+        state.reset(sender_id)
+        await vk_client.send_message(peer_id, "Главное меню", keyboard=build_main_menu_keyboard())
+        return
+
+    if action == "back":
+        previous = state.back(sender_id)
+        await _show_screen(app, sender_id, peer_id, previous, payload)
+        return
+
+    if action == "open_search":
+        state.push(sender_id, "search")
+        await vk_client.send_message(peer_id, "Введите название документа, тег или ключевые слова.", keyboard=build_navigation_keyboard())
+        return
+
+    if action == "open_smart_search":
+        state.push(sender_id, "smart_search")
+        await vk_client.send_message(peer_id, "Введите запрос для умного поиска.", keyboard=build_navigation_keyboard())
+        return
+
+    if action == "open_filters":
+        state.push(sender_id, "filters")
+        await vk_client.send_message(peer_id, "Выберите критерий фильтрации:", keyboard=build_filter_menu_keyboard())
+        return
+
+    if action == "filter_mode":
+        filter_name = payload.get("filter_name")
+        state.push(sender_id, f"filter:{filter_name}")
+        await vk_client.send_message(peer_id, f"Для фильтрации по {filter_name} введите значение после команды или просто напишите его в чат.", keyboard=build_navigation_keyboard())
+        return
+
+    if action == "open_document_list":
+        state.push(sender_id, "document_list")
+        await _show_document_list(service, vk_client, peer_id, page=1)
+        return
+
+    if action == "list_page":
+        page = int(payload.get("page", 1))
+        await _show_document_list(service, vk_client, peer_id, page=page)
+        return
+
+    if action == "open_upload":
+        admin_ids = set(Config.VK_ADMIN_IDS)
+        if admin_ids and str(sender_id) not in {str(item) for item in admin_ids}:
+            await vk_client.send_message(peer_id, "Загрузка документов доступна только администраторам.")
+            return
+        state.push(sender_id, "upload_waiting")
+        await vk_client.send_message(peer_id, "Отправьте один файл документа. Я проверю формат, сохраню и добавлю в архив.", keyboard=build_navigation_keyboard())
+        return
+
+    if action == "confirm_upload":
+        pending = app.get("pending_uploads", {}).get(sender_id)
+        if not pending:
+            await vk_client.send_message(peer_id, "Нет ожидающего файла для сохранения.")
+            state.reset(sender_id)
+            return
+        result = await persist_pending_upload(app, sender_id, peer_id)
+        await vk_client.send_message(peer_id, result, keyboard=build_main_menu_keyboard())
+        state.reset(sender_id)
+        return
+
+    if action == "cancel_upload":
+        app.get("pending_uploads", {}).pop(sender_id, None)
+        state.reset(sender_id)
+        await vk_client.send_message(peer_id, "Загрузка отменена.", keyboard=build_main_menu_keyboard())
+        return
+
+    if action == "open_document":
+        doc_id = payload.get("doc_id")
+        if doc_id:
+            await _show_document_card(service, vk_client, peer_id, doc_id)
+        return
+
+    if action == "download_document":
+        doc_id = payload.get("doc_id")
+        if not doc_id:
+            return
+        file_data = await service.download_document(doc_id)
+        if not file_data:
+            await vk_client.send_message(peer_id, f"Файл документа {doc_id} не найден.")
+            return
+        content, file_name = file_data
+        await vk_client.send_document(peer_id, content, file_name, f"{doc_id} — {file_name}")
+        await vk_client.send_message(peer_id, "Файл отправлен.", keyboard=build_navigation_keyboard())
+        return
+
+
+async def _show_screen(
+    app: web.Application,
+    sender_id: int,
+    peer_id: int,
+    screen: str,
+    payload: Optional[Dict[str, Any]],
+) -> None:
+    if screen == "main":
+        await app["vk_client"].send_message(peer_id, "Главное меню", keyboard=build_main_menu_keyboard())
+        return
+    if screen == "search":
+        await app["vk_client"].send_message(peer_id, "Введите название документа, тег или ключевые слова.", keyboard=build_navigation_keyboard())
+        return
+    if screen == "smart_search":
+        await app["vk_client"].send_message(peer_id, "Введите запрос для умного поиска.", keyboard=build_navigation_keyboard())
+        return
+    if screen == "document_list":
+        await _show_document_list(app["document_service"], app["vk_client"], peer_id, page=1)
+        return
+    if screen == "filters":
+        await app["vk_client"].send_message(peer_id, "Выберите критерий фильтрации:", keyboard=build_filter_menu_keyboard())
+        return
+    if screen.startswith("filter:"):
+        filter_name = screen.split(":", 1)[1]
+        await app["vk_client"].send_message(peer_id, f"Параметр: {filter_name}. Введите значение для фильтра.", keyboard=build_navigation_keyboard())
+        return
+    if screen == "upload_waiting":
+        await app["vk_client"].send_message(peer_id, "Отправьте файл документа.", keyboard=build_navigation_keyboard())
+        return
+    if screen == "upload_confirm":
+        await app["vk_client"].send_message(peer_id, "Нажмите подтвердить, чтобы сохранить документ.", keyboard=build_confirm_upload_keyboard())
+        return
+
+
+async def _show_document_list(
     service: DocumentService,
     vk_client: VKAPIClient,
     peer_id: int,
-    sender_id: int,
-    command: str,
-    argument: str,
-    original_text: str,
-) -> str:
-    if command in {"help", ""}:
-        return HELP_TEXT
-    if command == "search":
-        if not argument:
-            return "Укажите запрос: поиск вал приводной"
-        docs = await service.search_documents(argument)
-        return _format_documents(docs, f"Результаты поиска: {len(docs)}")
-    if command == "smart":
-        if not argument:
-            return "Укажите запрос: умный поиск вал с пазом"
-        result = await service.smart_search(argument)
-        return _format_documents(
-            result["all_results"], result["message"], result.get("llm_suggestions")
-        )
-    if command == "list":
-        page = int(argument) if argument.isdigit() else 1
-        docs, total = await service.get_document_list(page=max(page, 1), per_page=10)
-        return _format_documents(docs, f"Документы, страница {max(page, 1)}; всего: {total}")
-    if command == "get":
-        if not argument:
-            return "Укажите ID документа: инфо DOC-2024-0001"
-        info = await service.get_document_info(argument)
-        if not info:
-            return f"Документ {argument} не найден."
-        return (
-            f"{info['doc_id']} — {info.get('title', 'Без названия')}\n"
-            f"Тип: {info.get('doc_type') or 'не указан'}\n"
-            f"Номер: {info.get('drawing_number') or 'не указан'}\n"
-            f"Версия: {info.get('version') or 'не указана'}\n"
-            f"Техпроцесс: {info.get('tech_process') or 'не указан'}\n"
-            f"Статус: {info.get('status') or 'не указан'}\n"
-            f"Теги: {info.get('tags') or 'нет'}\n"
-            f"Описание: {info.get('description') or 'нет'}"
-        )
-    if command == "download":
-        if not argument:
-            return "Укажите ID документа: скачать DOC-2024-0001"
-        file_data = await service.download_document(argument)
-        if not file_data:
-            return f"Файл документа {argument} не найден."
-        content, file_name = file_data
-        await vk_client.send_document(peer_id, content, file_name, f"{argument} — {file_name}")
-        return f"Файл документа {argument} отправлен."
-    if command == "filter":
-        parts = argument.split(maxsplit=1)
-        if len(parts) != 2:
-            return "Формат: фильтр тип Чертеж | фильтр статус Активен | фильтр техпроцесс Токарная"
-        key, value = parts[0].lower(), parts[1]
-        filter_names = {
-            "тип": "doc_type", "статус": "status", "техпроцесс": "tech_process",
-            "type": "doc_type", "status": "status", "tech": "tech_process",
-        }
-        field = filter_names.get(key)
-        if not field:
-            return "Критерий должен быть: тип, статус или техпроцесс."
-        docs = await service.filter_documents(**{field: value})
-        return _format_documents(docs, f"Фильтр {key}: {value}; найдено: {len(docs)}")
-    if command == "stats":
-        stats = await service.get_statistics()
-        return (
-            f"Документов в архиве: {stats.get('total', 0)}\n"
-            f"По типам: {_format_counts(stats.get('by_type', {}))}\n"
-            f"По статусам: {_format_counts(stats.get('by_status', {}))}"
-        )
-    if command == "status":
-        parts = argument.split(maxsplit=1)
-        if len(parts) != 2:
-            return "Формат: статус DOC-2024-0001 Архивный"
-        success, result = await service.change_status(parts[0], parts[1], str(sender_id))
-        return result
-    if command == "add":
-        fields = [value.strip() for value in argument.split("|")]
-        if len(fields) != 7 or not fields[0]:
-            return (
-                "Формат: добавить Название | Тип | Номер | Версия | "
-                "Техпроцесс | Теги | Описание\nДля пропуска поля укажите -"
-            )
-        values = [None if value == "-" else value for value in fields]
-        data = dict(zip(
-            ("title", "doc_type", "drawing_number", "version", "tech_process", "tags", "description"),
-            values,
-        ))
-        document = await service.add_new_document(data, user=str(sender_id))
-        return f"Документ добавлен: {document.doc_id} — {document.title}" if document else "Не удалось добавить документ. Проверьте название и тип."
+    page: int = 1,
+) -> None:
+    docs, total = await service.get_document_list(page=max(page, 1), per_page=10)
+    total_pages = max((total + 9) // 10, 1)
+    title = f"Документы {page}/{total_pages} из {total}"
+    if not docs:
+        text = "В архиве пока нет документов."
+    else:
+        lines = [title]
+        for index, doc in enumerate(docs, 1):
+            lines.append(f"{(page - 1) * 10 + index}. {doc.doc_id} — {doc.title}")
+        text = "\n".join(lines)
+    await vk_client.send_message(
+        peer_id,
+        text,
+        keyboard=build_document_list_keyboard(page, total_pages, docs),
+    )
 
-    response = await service.process_free_text(original_text)
-    return response[:3500]
+
+async def _show_document_card(
+    service: DocumentService,
+    vk_client: VKAPIClient,
+    peer_id: int,
+    doc_id: str,
+) -> None:
+    info = await service.get_document_info(doc_id)
+    if not info:
+        await vk_client.send_message(peer_id, f"Документ {doc_id} не найден.")
+        return
+
+    text = (
+        f"Название: {info.get('title') or 'Без названия'}\n"
+        f"ID: {info.get('doc_id')}\n"
+        f"Тип: {info.get('doc_type') or 'не указан'}\n"
+        f"Статус: {info.get('status') or 'не указан'}\n"
+        f"Техпроцесс: {info.get('tech_process') or 'не указан'}\n"
+        f"Версия: {info.get('version') or 'не указана'}\n"
+        f"Теги: {info.get('tags') or 'нет'}\n"
+        f"Описание: {info.get('description') or 'нет'}"
+    )
+    keyboard = {
+        "one_time": False,
+        "buttons": [
+            [_button("📥 Получить файл", "download_document", doc_id=doc_id)],
+            [_button("◀️ Назад", "back"), _button("🏠 Главное меню", "main_menu")],
+        ],
+    }
+    await vk_client.send_message(peer_id, text, keyboard=keyboard)
+
+
+async def prepare_upload_document(
+    app: web.Application,
+    sender_id: int,
+    peer_id: int,
+    attachment: Dict[str, Any],
+) -> Dict[str, Any]:
+    vk_client: VKAPIClient = app["vk_client"]
+    service: DocumentService = app["document_service"]
+
+    try:
+        file_bytes = await vk_client.download_attachment(attachment)
+    except Exception as exc:
+        logger.exception("Ошибка скачивания вложения VK от %s", sender_id)
+        return {"status": "error", "text": f"Не удалось скачать файл: {exc}"}
+
+    doc = attachment.get("doc") if isinstance(attachment, dict) else None
+    file_name = (doc or attachment).get("title") or (doc or attachment).get("file_name") or f"upload_{sender_id}.bin"
+    _, ext = os.path.splitext(file_name)
+    if not FileService.validate_file_extension(file_name):
+        return {"status": "error", "text": "Недопустимый формат файла. Поддерживаются: .docx, .pdf, .dwg"}
+    if not FileService.validate_file_size(len(file_bytes)):
+        return {"status": "error", "text": "Файл слишком большой. Максимальный размер — 50 МБ."}
+
+    file_hash = hashlib.sha256(file_bytes).hexdigest()
+    duplicate = await service.find_duplicate_document(file_name, file_hash)
+    app.setdefault("pending_uploads", {})[sender_id] = {
+        "file_name": file_name,
+        "file_bytes": file_bytes,
+        "file_hash": file_hash,
+        "duplicate": duplicate,
+    }
+
+    if duplicate:
+        return {
+            "status": "pending",
+            "text": (
+                f"Возможно, такой документ уже существует: {duplicate.doc_id} — {duplicate.title}\n"
+                f"Файл: {file_name}\n\n"
+                "Проверьте данные и нажмите «Сохранить», чтобы добавить новый экземпляр в архив."
+            ),
+        }
+
+    return {
+        "status": "pending",
+        "text": (
+            f"Документ подготовлен к добавлению:\n"
+            f"Название: {os.path.splitext(os.path.basename(file_name))[0]}\n"
+            f"Формат: {ext.lower()}\n\n"
+            "Нажмите «Сохранить», чтобы добавить в базу документов."
+        ),
+    }
+
+
+async def persist_pending_upload(app: web.Application, sender_id: int, peer_id: int) -> str:
+    pending = app.get("pending_uploads", {}).pop(sender_id)
+    file_name = pending["file_name"]
+    file_bytes = pending["file_bytes"]
+    file_hash = pending["file_hash"]
+    service: DocumentService = app["document_service"]
+
+    safe_path = FileService.save_file(file_bytes, file_name)
+    if not safe_path:
+        return "Не удалось сохранить файл на сервере."
+
+    doc_data = {
+        "title": os.path.splitext(os.path.basename(file_name))[0],
+        "doc_type": "Загруженный документ",
+        "drawing_number": "",
+        "version": "1.0",
+        "tech_process": "",
+        "status": "Активен",
+        "file_path": safe_path,
+        "file_name": os.path.basename(file_name),
+        "tags": "uploaded,vk",
+        "description": "Загружен через VK бот",
+        "metadata_json": {
+            "source": "vk_upload",
+            "uploaded_by": sender_id,
+            "sha256": file_hash,
+            "extension": os.path.splitext(file_name)[1].lower(),
+        },
+    }
+
+    document = await service.add_new_document(doc_data, file_content=file_bytes, user=str(sender_id))
+    if not document:
+        return "Файл сохранён, но не удалось добавить запись в БД. Проверьте данные документа."
+    return f"✅ Документ сохранён: {document.doc_id} — {document.title}"
+
+
+async def cancel_background_tasks(app: web.Application) -> None:
+    tasks = list(app.get("tasks", set()))
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _format_documents(docs: list, title: str, suggestions: Optional[list] = None) -> str:
@@ -257,11 +617,3 @@ def _format_documents(docs: list, title: str, suggestions: Optional[list] = None
 
 def _format_counts(values: Dict[str, int]) -> str:
     return ", ".join(f"{name}: {count}" for name, count in values.items()) or "нет данных"
-
-
-async def cancel_background_tasks(app: web.Application) -> None:
-    tasks = list(app["tasks"])
-    for task in tasks:
-        task.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)

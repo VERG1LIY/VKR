@@ -450,6 +450,30 @@ class DocumentDatabase:
         finally:
             await session.close()
 
+    async def find_duplicate_document(
+        self, file_name: str, file_hash: Optional[str] = None
+    ) -> Optional[Document]:
+        """Проверяет, не был ли файл уже загружен ранее."""
+        session = await self.get_session()
+        if not session:
+            return None
+        try:
+            result = await session.execute(select(Document))
+            documents = result.scalars().all()
+            target_name = (file_name or "").lower()
+            for doc in documents:
+                metadata = doc.metadata_json or {}
+                if file_hash and metadata.get("sha256") == file_hash:
+                    return doc
+                if target_name and doc.file_name and doc.file_name.lower() == target_name:
+                    return doc
+            return None
+        except Exception as e:
+            print(f"⚠️ Ошибка проверки дублей: {e}")
+            return None
+        finally:
+            await session.close()
+
     async def register_vk_user(self, vk_id: int) -> bool:
         """Регистрирует пользователя VK; True означает первое обращение."""
         session = await self.get_session()

@@ -5,7 +5,13 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from config import Config
 from database.repository import DocumentDatabase
-from handlers.vk_callback import handle_callback, parse_text_command
+from handlers.vk_callback import (
+    handle_callback,
+    parse_text_command,
+    NavStateManager,
+    parse_payload,
+    build_payload,
+)
 
 
 def test_parse_vk_text_commands_and_arguments():
@@ -36,6 +42,26 @@ def test_callback_confirmation_and_secret(monkeypatch):
             assert await confirmation.text() == "confirmation-code"
 
     asyncio.run(exercise())
+
+
+def test_navigation_stack_and_payloads():
+    state = NavStateManager()
+
+    assert state.get(42) == ["main"]
+    state.push(42, "search")
+    state.push(42, "filters")
+    assert state.get(42) == ["main", "search", "filters"]
+
+    assert state.back(42) == "search"
+    assert state.get(42) == ["main", "search"]
+
+    state.reset(42)
+    assert state.get(42) == ["main"]
+
+    payload = build_payload("open_search")
+    assert parse_payload(payload) == {"action": "open_search"}
+    payload2 = build_payload("open_document", doc_id="DOC-2024-001")
+    assert parse_payload(payload2) == {"action": "open_document", "doc_id": "DOC-2024-001"}
 
 
 def test_vk_user_is_greeted_only_once(tmp_path):

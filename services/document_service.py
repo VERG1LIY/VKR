@@ -326,6 +326,12 @@ class DocumentService:
 
         return imported
 
+    async def find_duplicate_document(
+        self, file_name: str, file_hash: Optional[str] = None
+    ) -> Optional[Document]:
+        """Проверяет похожий документ по имени или хэшу."""
+        return await self.db.find_duplicate_document(file_name=file_name, file_hash=file_hash)
+
     async def get_available_types(self) -> List[str]:
         """Получение списка доступных типов документов."""
         return ["Чертеж", "Техпроцесс", "Спецификация", "Инструкция", "Схема", "Расчет"]

@@ -1,4 +1,5 @@
 """Минимальный асинхронный клиент VK API для Callback-бота."""
+import json
 from io import BytesIO
 import secrets
 from typing import Any, Dict, Optional
@@ -46,7 +47,8 @@ class VKAPIClient:
         return body.get("response")
 
     async def send_message(
-        self, peer_id: int, message: str, attachment: Optional[str] = None
+        self, peer_id: int, message: str, attachment: Optional[str] = None,
+        keyboard: Optional[Dict[str, Any]] = None
     ) -> Any:
         params: Dict[str, Any] = {
             "peer_id": peer_id,
@@ -55,7 +57,27 @@ class VKAPIClient:
         }
         if attachment:
             params["attachment"] = attachment
+        if keyboard is not None:
+            params["keyboard"] = json.dumps(keyboard, ensure_ascii=False)
         return await self.call("messages.send", **params)
+
+    async def download_file(self, url: str) -> bytes:
+        session = await self._get_session()
+        async with session.get(url) as response:
+            response.raise_for_status()
+            return await response.read()
+
+    async def download_attachment(self, attachment: Dict[str, Any]) -> bytes:
+        doc = attachment.get("doc") if isinstance(attachment, dict) else None
+        if doc is None and isinstance(attachment, dict):
+            doc = attachment
+        if doc is None:
+            raise VKAPIError("Пустое вложение VK")
+
+        file_url = doc.get("url")
+        if not file_url:
+            raise VKAPIError("VK не вернул URL файла для вложения")
+        return await self.download_file(file_url)
 
     async def send_document(
         self, peer_id: int, content: bytes, file_name: str, title: str
