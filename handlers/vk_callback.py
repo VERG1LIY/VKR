@@ -190,6 +190,140 @@ def parse_text_command(text: str) -> Tuple[str, str]:
     return aliases.get(command, ""), argument
 
 
+async def dispatch_text_command(
+    service: DocumentService,
+    vk_client: VKAPIClient,
+    peer_id: int,
+    sender_id: int,
+    command: str,
+    argument: str,
+    text: str,
+) -> str:
+    """Обработка текстовых команд бота в обычном чате VK."""
+    normalized_text = (text or argument or "").strip()
+
+    if command in {"help", "menu"}:
+        return HELP_TEXT
+    if command == "start":
+        return WELCOME_TEXT
+    if command == "search":
+        query = (argument or text).strip()
+        if not query:
+            return "Введите текст поиска. Пример: поиск вал редуктора"
+        docs = await service.search_documents(query)
+        return _format_documents(docs, f"Результаты поиска: {len(docs)}")
+    if command == "smart":
+        query = (argument or text).strip()
+        if not query:
+            return "Введите запрос для умного поиска."
+        result = await service.smart_search(query)
+        return _format_documents(
+            result.get("all_results", []),
+            result.get("message", "Результаты поиска"),
+            result.get("llm_suggestions"),
+        )
+    if command == "list":
+        page = 1
+        if argument and argument.strip().isdigit():
+            page = max(int(argument.strip()), 1)
+        docs, total = await service.get_document_list(page=page, per_page=10)
+        total_pages = max((total + 9) // 10, 1)
+        if not docs:
+            return "В архиве пока нет документов."
+        lines = [f"📋 Список документов {page}/{total_pages} (всего: {total})"]
+        for index, doc in enumerate(docs, 1):
+            lines.append(f"{index}. {doc.doc_id} — {doc.title} ({doc.status or 'без статуса'})")
+        return "\n".join(lines)
+    if command in {"get", "info"}:
+        doc_id = (argument or text).strip()
+        if not doc_id:
+            return "Укажите ID документа. Пример: /info DOC-2024-001"
+        info = await service.get_document_info(doc_id)
+        if not info:
+            return f"Документ {doc_id} не найден."
+        return (
+            f"Название: {info.get('title') or 'Без названия'}\n"
+            f"ID: {info.get('doc_id')}\n"
+            f"Тип: {info.get('doc_type') or 'не указан'}\n"
+            f"Статус: {info.get('status') or 'не указан'}\n"
+            f"Техпроцесс: {info.get('tech_process') or 'не указан'}\n"
+            f"Версия: {info.get('version') or 'не указана'}\n"
+            f"Теги: {info.get('tags') or 'нет'}\n"
+            f"Описание: {info.get('description') or 'нет'}"
+        )
+    if command == "download":
+        doc_id = (argument or text).strip()
+        if not doc_id:
+            return "Укажите ID документа. Пример: /download DOC-2024-001"
+        file_data = await service.download_document(doc_id)
+        if not file_data:
+            return f"Файл документа {doc_id} не найден."
+        content, file_name = file_data
+        await vk_client.send_document(peer_id, content, file_name, f"{doc_id} — {file_name}")
+        return "Файл отправлен."
+    if command == "filter":
+        filter_text = argument.strip() if argument else normalized_text
+        if not filter_text:
+            return "Формат: фильтр тип значение или фильтр статус Активен"
+        parts = filter_text.split(maxsplit=1)
+        if len(parts) == 2:
+            key, value = parts
+        else:
+            return "Формат: фильтр тип значение или фильтр статус Активен"
+        mapping = {
+            "тип": "doc_type",
+            "doc_type": "doc_type",
+            "статус": "status",
+            "status": "status",
+            "техпроцесс": "tech_process",
+            "tech_process": "tech_process",
+        }
+        criteria = mapping.get(key.lower(), key.lower())
+        kwargs = {criteria: value.strip()}
+        docs = await service.filter_documents(**kwargs)
+        return _format_documents(docs, f"Результаты фильтрации: {len(docs)}")
+    if command == "stats":
+        stats = await service.get_statistics()
+        return _format_counts(stats)
+    if command == "status":
+        parts = argument.split(maxsplit=1)
+        if len(parts) < 2:
+            return "Формат: /status DOC-2024-001 Активен"
+        admin_ids = set(Config.VK_ADMIN_IDS)
+        if admin_ids and str(sender_id) not in {str(item) for item in admin_ids}:
+            return "Изменение статуса доступно только администраторам."
+        success, message = await service.change_status(parts[0], parts[1], str(sender_id))
+        return message
+    if command == "add":
+        raw_fields = [part.strip() for part in (argument or text).split("|")]
+        if len(raw_fields) < 7:
+            return (
+                "Формат: добавить Название | Тип | Номер | Версия | Техпроцесс | Теги | Описание"
+            )
+        title, doc_type, drawing_number, version, tech_process, tags, description = raw_fields[:7]
+        document = await service.add_new_document(
+            {
+                "title": title,
+                "doc_type": doc_type or None,
+                "drawing_number": drawing_number or "",
+                "version": version or "1.0",
+                "tech_process": tech_process or None,
+                "tags": tags or "",
+                "description": description or "",
+                "status": "Активен",
+            },
+            file_content=None,
+            user=str(sender_id),
+        )
+        if not document:
+            return "❌ Не удалось добавить документ. Проверьте обязательные поля."
+        return f"✅ Документ добавлен: {document.doc_id} — {document.title}"
+
+    if normalized_text:
+        return await service.process_free_text(normalized_text)
+    return "Введите команду или запрос."
+
+
 def create_vk_app(
     db: Any, document_service: DocumentService, vk_client: VKAPIClient
 ) -> web.Application:

@@ -11,6 +11,7 @@ from handlers.vk_callback import (
     NavStateManager,
     parse_payload,
     build_payload,
+    process_message,
 )
 
 
@@ -62,6 +63,52 @@ def test_navigation_stack_and_payloads():
     assert parse_payload(payload) == {"action": "open_search"}
     payload2 = build_payload("open_document", doc_id="DOC-2024-001")
     assert parse_payload(payload2) == {"action": "open_document", "doc_id": "DOC-2024-001"}
+
+
+def test_process_message_handles_text_command():
+    async def exercise():
+        class FakeDB:
+            async def register_vk_user(self, vk_id):
+                return False
+
+        class FakeVKClient:
+            def __init__(self):
+                self.messages = []
+
+            async def send_message(self, peer_id, message, attachment=None, keyboard=None):
+                self.messages.append({"peer_id": peer_id, "message": message, "keyboard": keyboard})
+
+        class FakeService:
+            async def search_documents(self, query):
+                return []
+
+            async def smart_search(self, query):
+                return {"all_results": [], "message": "Ничего не найдено", "llm_suggestions": []}
+
+            async def get_document_list(self, page=1, per_page=10):
+                return [], 0
+
+            async def get_document_info(self, doc_id):
+                return None
+
+            async def get_statistics(self):
+                return {"documents": 0}
+
+            async def process_free_text(self, text):
+                return "Свободный текст обработан"
+
+        app = web.Application()
+        app["db"] = FakeDB()
+        app["document_service"] = FakeService()
+        app["vk_client"] = FakeVKClient()
+        app["menu_state"] = NavStateManager()
+        app["pending_uploads"] = {}
+
+        await process_message(app, {"text": "помощь"}, 101, 202)
+
+        assert app["vk_client"].messages[-1]["message"].startswith("Команды для управления:")
+
+    asyncio.run(exercise())
 
 
 def test_vk_user_is_greeted_only_once(tmp_path):
