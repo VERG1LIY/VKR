@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 
 from aiohttp import web
@@ -12,6 +13,7 @@ from handlers.vk_callback import (
     NavStateManager,
     parse_payload,
     build_payload,
+    build_main_menu_keyboard,
     process_message,
     persist_pending_upload,
     handle_vk_action,
@@ -435,5 +437,98 @@ def test_startup_repair_links_only_existing_database_records(tmp_path):
             "indexed.pdf",
         )
         await db.close()
+
+    asyncio.run(exercise())
+
+
+def test_text_keyboard_payload_dispatches_button_action_and_logs(caplog):
+    class FakeDB:
+        async def register_vk_user(self, vk_id):
+            return False
+
+    class FakeVKClient:
+        def __init__(self):
+            self.messages = []
+
+        async def send_message(self, peer_id, message, attachment=None, keyboard=None):
+            self.messages.append({"message": message, "keyboard": keyboard})
+
+    class FakeService:
+        pass
+
+    app = web.Application()
+    app["db"] = FakeDB()
+    app["document_service"] = FakeService()
+    app["vk_client"] = FakeVKClient()
+    app["menu_state"] = NavStateManager()
+    app["pending_uploads"] = {}
+
+    async def exercise():
+        await process_message(
+            app,
+            {"text": "🔎 Поиск", "payload": build_payload("open_search")},
+            101,
+            202,
+        )
+
+    caplog.set_level(logging.INFO, logger="docbot")
+    asyncio.run(exercise())
+
+    assert app["menu_state"].current(101) == "search"
+    assert "Введите название документа" in app["vk_client"].messages[-1]["message"]
+    assert "🔎 Поиск" in caplog.text
+
+
+def test_main_menu_payload_buttons_dispatch_to_their_own_handlers():
+    class FakeDB:
+        async def register_vk_user(self, vk_id):
+            return False
+
+    class FakeVKClient:
+        def __init__(self):
+            self.messages = []
+
+        async def send_message(self, peer_id, message, attachment=None, keyboard=None):
+            self.messages.append({"message": message, "keyboard": keyboard})
+
+    class FakeService:
+        async def get_available_tags(self):
+            return ["насос"]
+
+        async def get_document_list(self, page=1, per_page=10):
+            return [], 0
+
+    app = web.Application()
+    app["db"] = FakeDB()
+    app["document_service"] = FakeService()
+    app["vk_client"] = FakeVKClient()
+    app["menu_state"] = NavStateManager()
+    app["pending_uploads"] = {}
+
+    expected_responses = {
+        "open_search": "Введите название документа",
+        "open_smart_search": "умного поиска",
+        "open_filters": "Выберите тег",
+        "open_document_list": "В архиве пока нет документов",
+        "open_upload": "Отправьте один файл документа",
+        "main_menu": "Главное меню",
+    }
+
+    async def exercise():
+        buttons = build_main_menu_keyboard()["buttons"]
+        payload_actions = {
+            parse_payload(button["action"]["payload"])["action"]
+            for row in buttons for button in row
+        }
+        assert payload_actions == set(expected_responses)
+
+        for action, expected_text in expected_responses.items():
+            await process_message(
+                app,
+                {"text": f"button label {action}", "payload": build_payload(action)},
+                101,
+                202,
+            )
+            assert expected_text in app["vk_client"].messages[-1]["message"]
 
     asyncio.run(exercise())

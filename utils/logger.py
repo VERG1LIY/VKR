@@ -4,6 +4,7 @@
 import logging
 import sys
 from datetime import datetime
+from pathlib import Path
 
 
 def setup_logger(name: str = "docbot") -> logging.Logger:
@@ -18,6 +19,8 @@ def setup_logger(name: str = "docbot") -> logging.Logger:
     """
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
+    if logger.handlers:
+        return logger
 
     # Формат логов
     formatter = logging.Formatter(
@@ -33,8 +36,10 @@ def setup_logger(name: str = "docbot") -> logging.Logger:
 
     # Вывод в файл
     try:
+        log_dir = Path(__file__).resolve().parent.parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(
-            f"logs/bot_{datetime.now().strftime('%Y%m%d')}.log",
+            log_dir / f"bot_{datetime.now().strftime('%Y%m%d')}.log",
             encoding="utf-8"
         )
         file_handler.setLevel(logging.INFO)

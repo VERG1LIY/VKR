@@ -2,7 +2,6 @@
 import asyncio
 import hashlib
 import json
-import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -12,9 +11,7 @@ from config import Config
 from services.document_service import DocumentService
 from services.file_service import FileService
 from services.vk_api import VKAPIClient
-
-
-logger = logging.getLogger(__name__)
+from utils.logger import logger
 
 WELCOME_TEXT = (
     "Добро пожаловать! Я бот архива технической документации.\n\n"
@@ -421,6 +418,12 @@ async def process_message(
         text = str(message.get("text", "")).strip()
         attachments = message.get("attachments") or []
         current = state.current(sender_id)
+        button_payload = parse_payload(message.get("payload"))
+        button_action = button_payload.get("action")
+        logger.info(
+            "VK message sender=%s peer=%s text=%r attachments=%s button_action=%s",
+            sender_id, peer_id, text, len(attachments), button_action or "-",
+        )
 
         if current == "upload_waiting" and attachments:
             response = await prepare_upload_document(app, sender_id, peer_id, attachments[0])
@@ -434,6 +437,13 @@ async def process_message(
             else:
                 state.reset(sender_id)
                 await vk_client.send_message(peer_id, response["text"], keyboard=build_main_menu_keyboard())
+            return
+
+        if button_action:
+            await app["db"].register_vk_user(sender_id)
+            await handle_vk_action(
+                app, sender_id, peer_id, str(button_action), button_payload
+            )
             return
 
         is_first_message = await app["db"].register_vk_user(sender_id)
@@ -519,6 +529,10 @@ async def handle_vk_action(
     payload = payload or {}
     vk_client: VKAPIClient = app["vk_client"]
     service: DocumentService = app["document_service"]
+    logger.info(
+        "VK button action sender=%s peer=%s action=%s payload=%s",
+        sender_id, peer_id, action, payload,
+    )
 
     if action == "main_menu":
         state.reset(sender_id)
