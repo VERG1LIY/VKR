@@ -1,3 +1,239 @@
+# VK Callback Bot for Document Management System of a Machine-Building Enterprise
+
+An asynchronous VK community bot for managing technical documentation. Receives events via Callback API, stores data in an SQL database, and, when configured, uses a local LLM via LM Studio.
+
+## Functional Capabilities
+
+### Bot Commands
+| Command | Description |
+|---------|-------------|
+| `помощь` | Commands and examples |
+| `поиск <text>` | Search by title, description, and tags |
+| `умный поиск <text>` | Search expanded with synonyms via LLM |
+| `фильтр тип|статус|техпроцесс <value>` | Filter documents |
+| `инфо <doc_id>` | Document card |
+| `скачать <doc_id>` | Send a file from the archive |
+| `список [page]` | List of documents |
+| `статистика` | Archive summary |
+| `статус <doc_id> <status>` | Change status (administrator) |
+| `добавить Название | Тип | Номер | Версия | Техпроцесс | Теги | Описание` | Add a card (administrator) |
+
+Commands are also accepted as `/search ...`, `/help`, etc. The user's first message receives a greeting with help; arbitrary text is processed via RAG.
+
+## Tech Stack
+
+- **Python 3.10+**
+- **aiohttp** — Callback API server and asynchronous HTTP requests
+- **VK API** — community messages and file sending
+- **SQLAlchemy 2.0** — ORM for working with the database
+- **SQLite/PostgreSQL** — via switching `DATABASE_URL` in `.env`
+- **LM Studio** — local LLM (OpenAI-compatible API)
+- **aiohttp** — asynchronous HTTP requests to the LLM
+
+## Project Architecture
+
+```
+project/
+├── .env                        # Environment variables
+├── .gitignore
+├── requirements.txt
+├── main.py                     # HTTP Callback API server
+├── config.py                   # Configuration
+├── database/
+│   ├── __init__.py
+│   ├── models.py               # SQLAlchemy models
+│   ├── repository.py           # Repository (CRUD + fallback)
+│   └── init_test_data.sql      # Test data
+├── services/
+│   ├── __init__.py
+│   ├── document_service.py     # Business logic
+│   ├── llm_service.py          # LLM integration
+│   └── file_service.py         # File handling
+├── handlers/
+│   ├── __init__.py
+│   └── vk_callback.py          # Callback endpoint and text commands
+├── utils/
+│   ├── __init__.py
+│   ├── logger.py               # Logging
+│   └── validators.py           # Data validation
+└── uploads/documents/          # Uploaded files
+```
+
+## Installation and Launch
+
+### 1. Cloning the Repository
+```bash
+git clone <repository-url>
+cd docbot
+```
+
+### 2. Creating a Virtual Environment
+```bash
+python -m venv venv
+# Windows
+venv\Scripts\activate
+# Linux/Mac
+source venv/bin/activate
+```
+
+### 3. Installing Dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Configuring .env
+Fill in `.env` or copy `.env.example` (`copy .env.example .env` on Windows, `cp .env.example .env` on Linux). Enter values for the VK fields from the community's Callback API settings:
+```env
+# VK community access key with message and document permissions
+VK_ACCESS_TOKEN=community_token
+# Callback API secret and confirmation string from community settings
+VK_CALLBACK_SECRET=secret_string
+VK_CONFIRMATION_CODE=confirmation_string
+VK_API_VERSION=5.199
+# Address the bot listens on (nginx proxies here via proxy_pass)
+HOST=127.0.0.1
+PORT=3000
+# Path VK sends events to (must match the location in nginx)
+VK_CALLBACK_PATH=/
+
+# Database (SQLite by default)
+DATABASE_URL=sqlite+aiosqlite:///documents.db
+
+# For PostgreSQL:
+# DATABASE_URL=postgresql+asyncpg://user:pass@localhost/docdb
+
+# LM Studio API (local LLM)
+LLM_API_URL=http://localhost:1234/v1
+LLM_MODEL=qwen-3-4b
+
+# Maximum file size (50MB)
+MAX_FILE_SIZE=52428800
+
+# Upload directory
+UPLOAD_DIR=uploads/documents
+```
+
+`VK_ACCESS_TOKEN` must be a community token with permissions for messages and documents. `VK_CALLBACK_SECRET` must match the Callback API secret key, and `VK_CONFIRMATION_CODE` must match the confirmation code shown by VK for this Callback server. Do not publish the filled-in `.env` or add it to Git.
+
+### 5. Launching LM Studio (optional, for AI features)
+1. Download and install [LM Studio](https://lmstudio.ai/)
+2. Load a model (e.g., `qwen-3-4b` or `mistral-7b`)
+3. Start the local server: `http://localhost:1234/v1`
+4. The bot works even without an LLM, using basic search
+
+### 6. Configuring the Community Callback API
+1. Deploy the application on a server with a permanent public HTTPS address.
+2. Set up an HTTPS reverse proxy to `http://127.0.0.1:8080`.
+3. In VK community management, enable messages and Callback API.
+4. Specify the URL `https://your-domain/` or another `VK_CALLBACK_PATH` from `.env`, the API version from `VK_API_VERSION`, the secret, and the confirmation code. The server responds to the `confirmation` event with an HTTP body containing only `VK_CONFIRMATION_CODE`; to other events it responds with `ok`.
+5. Enable the `message_new` event and allow receiving messages from users.
+6. Configure nginx so that `proxy_pass http://127.0.0.1:3000/;` matches `HOST`, `PORT`, and `VK_CALLBACK_PATH`.
+
+### 7. Launching the Bot
+```bash
+python main.py
+```
+
+Health check: `https://your-domain/health`. The Callback API must be externally accessible via HTTPS; the built-in server listens on HTTP and does not set up TLS itself.
+
+### 8. Initializing Test Data (optional)
+After the first launch, the database is created automatically.
+To load test data, run the SQL script:
+```bash
+# If you use SQLite — the database is already created
+# To load test data use:
+sqlite3 documents.db < database/init_test_data.sql
+```
+
+## Database
+
+### Table Structure
+
+#### documents
+| Field | Type | Description |
+|-------|------|-------------|
+| id | SERIAL | Primary key |
+| doc_id | VARCHAR(50) | Unique document ID (DOC-2024-001) |
+| title | VARCHAR(255) | Document title |
+| doc_type | VARCHAR(50) | Type (Drawing, Tech process...) |
+| drawing_number | VARCHAR(100) | Drawing number per ESKD |
+| version | VARCHAR(20) | Document version |
+| tech_process | VARCHAR(100) | Tech process |
+| status | VARCHAR(20) | Status (Active, Archive...) |
+| file_path | VARCHAR(500) | Path to file |
+| file_name | VARCHAR(255) | File name |
+| tags | TEXT | Tags separated by commas |
+| description | TEXT | Description |
+| created_at | TIMESTAMP | Creation date |
+| updated_at | TIMESTAMP | Update date |
+| created_by | VARCHAR(100) | Created by |
+| metadata_json | JSONB | Additional fields |
+
+#### document_history
+| Field | Type | Description |
+|-------|------|-------------|
+| id | SERIAL | Primary key |
+| doc_id | VARCHAR(50) | Document ID (FK) |
+| action | VARCHAR(50) | Action |
+| old_value | TEXT | Old value |
+| new_value | TEXT | New value |
+| changed_at | TIMESTAMP | Change date |
+| changed_by | VARCHAR(100) | Changed by |
+
+## Security
+
+- All database queries use parameterized queries (SQLAlchemy)
+- Maximum size of a file uploaded to the archive: 50 MB
+- Allowed extensions: .docx, .pdf, .dwg
+- Callback secret verification and protection of data-modifying commands at the application level
+- Fallback to JSON storage when the database is unavailable
+- Graceful shutdown on termination
+
+## Fault Tolerance
+
+- When the database is unavailable, JSON storage is used (`fallback_db.json`)
+- When the LLM is unavailable — basic search via SQL
+- Timeout handling for LLM requests (120 sec)
+- Error and exception handling in all methods
+
+## Usage Examples
+
+### AI Search
+```
+User: умный поиск вал с шпоночным пазом
+Bot: 
+🔍 Ищу документы...
+✅ Найдено 5 документов (включая 2 по синонимам)
+💡 ИИ предлагает синонимы: вал приводной, вал-шестерня, шпонка
+1. DOC-2024-001 — Вал приводной редуктора (Активен)
+...
+🏆 Наиболее релевантный: DOC-2024-001
+```
+
+### Adding a Document Card
+```
+User: добавить Вал редуктора | Чертеж | АБВГ.123.001 | 1.0 | Токарная | вал, редуктор | Вал приводной
+Bot: Документ добавлен: DOC-2026-1234 — Вал редуктора
+```
+
+### Free-form Query
+```
+User: покажи чертежи по фрезеровке
+Bot: 🔍 Анализирую запрос...
+Найдено 3 чертежа, связанных с фрезерной обработкой:
+...
+```
+
+## Environment Requirements
+
+- Python 3.10 or higher
+- For PostgreSQL: `pip install asyncpg`
+- VK community with messages and Callback API enabled
+- Public HTTPS domain and reverse proxy to the application port
+- LM Studio (optional, for AI features)
+
+---
+
 # VK Callback-бот для системы документооборота машиностроительного предприятия
 
 Асинхронный бот сообщества VK для управления технической документацией. Получает события через Callback API, хранит данные в SQL базе и при настройке использует локальную LLM через LM Studio.
