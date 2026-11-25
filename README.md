@@ -54,16 +54,30 @@ project/
 │   ├── __init__.py
 │   ├── document_service.py     # Business logic
 │   ├── llm_service.py          # LLM integration
-│   └── file_service.py         # File handling
+│   ├── vk_api.py               # VK API client and file transfers
+│   └── file_service.py         # File validation and storage
 ├── handlers/
 │   ├── __init__.py
 │   └── vk_callback.py          # Callback endpoint and text commands
+├── import_docs/                # Files indexed during startup
+├── uploads/documents/          # Uploaded files
 ├── utils/
 │   ├── __init__.py
 │   ├── logger.py               # Logging
 │   └── validators.py           # Data validation
-└── uploads/documents/          # Uploaded files
 ```
+
+## How the bot works
+
+1. **Startup (`main.py`)** — loads configuration, checks required VK settings, initializes the database and services, checks LM Studio, repairs known file paths, and imports supported files from `IMPORT_DIR`.
+2. **VK Callback (`handlers/vk_callback.py`)** — validates the callback request and secret. For a `message_new` event, it schedules message processing and acknowledges the callback with `ok`.
+3. **Message routing** — `process_message` distinguishes uploads, keyboard payloads, commands, list navigation, and free-form text. Button actions and text commands are routed to their respective handlers.
+4. **Document search (`services/document_service.py`)** — searches the database and removes duplicate folder-import entries. Smart search may ask the LLM for synonyms when the initial result set is small.
+5. **LLM response (`services/llm_service.py`)** — free-form questions are sent to the configured OpenAI-compatible endpoint with context from up to five matched documents. If the LLM is unavailable or times out, the bot returns a fallback response; the next user request can try the LLM again.
+6. **Document delivery (`services/vk_api.py`)** — for a downloadable file, the bot reads the local bytes, requests a VK upload URL, uploads the file, saves it with `docs.save`, then sends the attachment with `messages.send`.
+7. **Shutdown** — closes the VK and LLM HTTP sessions and database resources.
+
+The main responsibilities are separated: `main.py` starts services; `handlers/` handles VK events and user state; `services/` contains document, file, LLM, and VK API logic; `database/repository.py` stores and searches records.
 
 ## Installation and Launch
 
@@ -124,13 +138,7 @@ IMPORT_DIR=import_docs
 
 `VK_ACCESS_TOKEN` must be a community token with permissions for messages and documents. `VK_CALLBACK_SECRET` must match the Callback API secret key, and `VK_CONFIRMATION_CODE` must match the confirmation code shown by VK for this Callback server. Do not publish the filled-in `.env` or add it to Git.
 The bot indexes supported files from `IMPORT_DIR` on startup. The configured `LLM_API_URL` must be reachable from the bot server; use `localhost` only when LM Studio runs on that same machine.
-If VK returns error 15 for `docs.getMessagesUploadServer`, verify that the running process uses the current token for the intended community and that the Documents permission is granted to that token. If you replace the token, update the active environment or `.env` and restart the bot; process environment variables take precedence over `.env`.
-
-### VK API connectivity and document delivery
-
-Sending a file requires several sequential VK operations: request an upload server, upload the file, save it with `docs.save`, then send the resulting attachment with `messages.send`. VK requests and file transfers use the client's 20-second HTTP timeout. The client does not automatically retry failed VK requests or uploads.
-
-Intermittent connection errors can occur if the bot server cannot reach VK over HTTPS, DNS or firewall/proxy connectivity is interrupted, or VK's API/upload service is temporarily unavailable. Check the bot's server log for the failed method or network exception. After connectivity is restored, retry the user's document request. A VK API error response such as code 15 is an access/scope rejection, not a network timeout; confirm the token actually loaded by the running process and that it belongs to the intended community.
+For VK credential and connection troubleshooting, see [Possible VK API errors](#possible-vk-api-errors).
 
 ### 5. Launching LM Studio (optional, for AI features)
 1. Download and install [LM Studio](https://lmstudio.ai/)
@@ -152,6 +160,19 @@ python main.py
 ```
 
 Health check: `https://your-domain/health`. The Callback API must be externally accessible via HTTPS; the built-in server listens on HTTP and does not set up TLS itself.
+
+## Possible VK API errors
+
+Document sending makes sequential VK calls: `docs.getMessagesUploadServer` → file upload → `docs.save` → `messages.send`. The client uses a 20-second HTTP timeout and does **not** retry failed requests automatically.
+
+| What you see | Likely meaning | What to check |
+|---|---|---|
+| `15 Access denied` on `docs.getMessagesUploadServer` | VK rejected the active token for this method; this is an access/scope error, not a connection timeout. | Verify that the running process uses the newly issued token, the token belongs to the intended community, and its Documents permission is enabled. Process environment variables override `.env`; restart the bot after updating the token. Never share the token in logs or chat. |
+| Connection timeout, DNS, SSL, or connector error | The server could not complete an HTTPS request to VK or its upload host in time. | Check outbound HTTPS, DNS, firewall/proxy settings, server logs, and VK service availability. Retry the request after connectivity is restored. |
+| HTTP error while uploading or saving a document | VK or the upload endpoint returned an unsuccessful HTTP response. | Use the logged exception to identify whether the failure occurred during the API call, file upload, save, or message send. Check network stability and retry once the endpoint is available. |
+| Document card is visible but there is no download option | The record exists, but its file is not present at the recorded server path. | Restore the file to the server or place it back in the configured import/upload directory; a database record alone cannot recreate missing file contents. |
+
+VK API errors include the method and VK error code in the server log. Network exceptions are logged by the message handler. There is no automatic retry or guaranteed delivery after a transient failure.
 
 ### 8. Initializing Test Data (optional)
 After the first launch, the database is created automatically.
@@ -308,16 +329,30 @@ project/
 │   ├── __init__.py
 │   ├── document_service.py     # Бизнес-логика
 │   ├── llm_service.py          # Работа с LLM
-│   └── file_service.py         # Работа с файлами
+│   ├── vk_api.py               # Клиент VK API и передача файлов
+│   └── file_service.py         # Проверка и хранение файлов
 ├── handlers/
 │   ├── __init__.py
 │   └── vk_callback.py          # Callback endpoint и текстовые команды
+├── import_docs/                # Файлы для индексации при запуске
+├── uploads/documents/          # Загруженные файлы
 ├── utils/
 │   ├── __init__.py
 │   ├── logger.py               # Логирование
 │   └── validators.py           # Валидация данных
-└── uploads/documents/          # Загруженные файлы
 ```
+
+## Как работает бот: поток обработки
+
+1. **Запуск (`main.py`)** — загружает конфигурацию, проверяет обязательные настройки VK, инициализирует базу и сервисы, проверяет LM Studio, восстанавливает известные пути к файлам и импортирует поддерживаемые документы из `IMPORT_DIR`.
+2. **Callback VK (`handlers/vk_callback.py`)** — проверяет входящий запрос и секрет. Для события `message_new` запускает обработку сообщения в отдельной задаче и подтверждает Callback ответом `ok`.
+3. **Маршрутизация сообщения** — `process_message` различает загрузку файла, действия кнопок, команды, навигацию по списку и обычный текст. Действия кнопок и команды передаются соответствующим обработчикам.
+4. **Поиск документов (`services/document_service.py`)** — ищет записи в базе и удаляет дубликаты импортов из папки. Умный поиск может запросить у LLM синонимы, если первоначально найдено мало документов.
+5. **Ответ LLM (`services/llm_service.py`)** — свободный вопрос отправляется в настроенный OpenAI-совместимый API вместе с контекстом до пяти найденных документов. При недоступности или таймауте LLM бот формирует резервный ответ; следующий запрос пользователя может снова обратиться к LLM.
+6. **Отправка документа (`services/vk_api.py`)** — бот читает файл с сервера, запрашивает у VK адрес загрузки, загружает файл, сохраняет через `docs.save`, затем отправляет вложение методом `messages.send`.
+7. **Завершение** — закрываются HTTP-сессии VK и LLM и ресурсы базы данных.
+
+Зоны ответственности разделены: `main.py` запускает сервисы; `handlers/` обрабатывает события VK и состояние диалога; `services/` содержит логику документов, файлов, LLM и VK API; `database/repository.py` сохраняет записи и выполняет поиск.
 
 ## Установка и запуск
 
@@ -378,13 +413,7 @@ IMPORT_DIR=import_docs
 
 `VK_ACCESS_TOKEN` должен быть токеном сообщества с разрешениями на сообщения и документы. `VK_CALLBACK_SECRET` должен совпадать с секретным ключом Callback API, а `VK_CONFIRMATION_CODE` — с кодом подтверждения, показанным VK для этого Callback-сервера. Не публикуйте заполненный `.env` и не добавляйте его в Git.
 При запуске бот индексирует поддерживаемые файлы из `IMPORT_DIR`. Адрес `LLM_API_URL` должен быть доступен с сервера бота; `localhost` подходит только если LM Studio запущена на той же машине.
-Если VK возвращает ошибку 15 для `docs.getMessagesUploadServer`, проверьте, что запущенный процесс использует актуальный токен нужного сообщества и разрешение «Документы» выдано именно этому токену. После замены токена обновите активное окружение или `.env` и перезапустите бота; переменные окружения процесса имеют приоритет над `.env`.
-
-### Подключение к VK API и отправка документов
-
-Отправка файла состоит из нескольких последовательных операций VK: запрос сервера загрузки, загрузка файла, сохранение через `docs.save`, затем отправка вложения через `messages.send`. Для запросов VK и загрузки файлов действует общий HTTP-таймаут клиента 20 секунд. Автоматических повторов неудачных запросов или загрузок нет.
-
-Периодические ошибки подключения возможны, если сервер бота временно не может обращаться к VK по HTTPS, возникают сбои DNS/сети/фаервола/прокси либо временно недоступен API или сервер загрузки VK. Проверьте лог бота на сервере: там указываются метод VK или сетевая ошибка. После восстановления связи повторите запрос на документ. Ответ VK с кодом 15 означает отказ в доступе/правах, а не сетевой таймаут: проверьте фактически загруженный токен и что он относится к нужному сообществу.
+Подробные рекомендации по токену и ошибкам соединения приведены в разделе [Возможные ошибки VK API](#возможные-ошибки-vk-api).
 
 ### 5. Запуск LM Studio (опционально, для работы с ИИ)
 1. Скачайте и установите [LM Studio](https://lmstudio.ai/)
@@ -406,6 +435,19 @@ python main.py
 ```
 
 Проверка доступности: `https://ваш-домен/health`. Callback API должен быть доступен извне по HTTPS; встроенный сервер слушает HTTP и не настраивает TLS самостоятельно.
+
+## Возможные ошибки VK API
+
+Отправка документа выполняется последовательными запросами VK: `docs.getMessagesUploadServer` → загрузка файла → `docs.save` → `messages.send`. Для запросов и загрузки действует HTTP-таймаут 20 секунд; автоматического повтора неудачных запросов нет.
+
+| Что наблюдается | Что это обычно означает | Что проверить |
+|---|---|---|
+| `15 Access denied` при `docs.getMessagesUploadServer` | VK отклонил активный токен для этого метода; это отказ доступа/прав, а не таймаут соединения. | Убедитесь, что процесс использует новый токен, токен создан для нужного сообщества и у него включено разрешение «Документы». Переменные окружения процесса имеют приоритет над `.env`; после обновления токена перезапустите бота. Не публикуйте токен в логах или переписке. |
+| Таймаут, ошибка DNS, SSL или подключения | Сервер не смог вовремя выполнить HTTPS-запрос к VK или серверу загрузки. | Проверьте исходящий HTTPS, DNS, firewall/proxy, логи сервера и доступность VK. После восстановления связи повторите запрос. |
+| HTTP-ошибка при загрузке или сохранении документа | VK или сервер загрузки вернул неуспешный HTTP-ответ. | По исключению в серверном логе определите этап сбоя: API-вызов, загрузка файла, сохранение или отправка сообщения. Проверьте сеть и повторите запрос после восстановления сервиса. |
+| Карточка документа есть, но скачать файл нельзя | Запись есть в базе, но файла нет по сохранённому серверному пути. | Верните файл на сервер или в настроенную папку импорта/загрузки: одной записи базы недостаточно, чтобы восстановить содержимое. |
+
+Ошибки VK API содержат в серверном логе название метода и код VK. Сетевые исключения логируются обработчиком сообщения. Автоматических повторов и гарантированной доставки при временном сбое нет.
 
 ### 8. Инициализация тестовых данных (опционально)
 После первого запуска база данных создаётся автоматически.
