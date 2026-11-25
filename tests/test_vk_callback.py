@@ -370,6 +370,79 @@ def test_vk_api_error_keeps_permission_code():
     asyncio.run(exercise())
 
 
+def test_vk_send_document_handles_wrapped_save_responses():
+    from services.vk_api import VKAPIClient
+
+    async def exercise():
+        class UploadResponse:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            def raise_for_status(self):
+                return None
+
+            async def json(self):
+                return {"file": "upload-ticket"}
+
+        class FakeSession:
+            def __init__(self):
+                self.timeout = None
+
+            def post(self, url, data, timeout):
+                assert url == "https://vk-upload.test/upload"
+                self.timeout = timeout
+                return UploadResponse()
+
+        responses = [
+            {"type": "doc", "doc": {"owner_id": -10, "id": 21, "access_key": "key"}},
+            [{"doc": [{"owner_id": -10, "id": 22}]}],
+        ]
+        sent = []
+
+        for saved_response in responses:
+            client = VKAPIClient("test-token")
+            session = FakeSession()
+            calls = []
+
+            async def call(method, **params):
+                calls.append((method, params))
+                if method == "docs.getMessagesUploadServer":
+                    return {"upload_url": "https://vk-upload.test/upload"}
+                return saved_response
+
+            async def get_session():
+                return session
+
+            async def send_message(peer_id, message, attachment=None, keyboard=None):
+                sent.append((peer_id, message, attachment))
+                return "sent"
+
+            client.call = call
+            client._get_session = get_session
+            client.send_message = send_message
+
+            result = await client.send_document(
+                42, b"document-bytes", "manual.pdf", "Manual"
+            )
+
+            assert result == "sent"
+            assert calls[1] == (
+                "docs.save",
+                {"file": "upload-ticket", "title": "Manual"},
+            )
+            assert session.timeout.total == 120
+
+        assert sent == [
+            (42, "📎 Manual", "doc-10_21_key"),
+            (42, "📎 Manual", "doc-10_22"),
+        ]
+
+    asyncio.run(exercise())
+
+
 def test_document_download_explains_missing_vk_documents_permission():
     from services.vk_api import VKAPIError
 

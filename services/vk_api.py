@@ -90,6 +90,12 @@ class VKAPIClient:
         upload_info = await self.call(
             "docs.getMessagesUploadServer", peer_id=peer_id, type="doc"
         )
+        if not isinstance(upload_info, dict):
+            raise VKAPIError("VK вернул некорректный ответ для сервера загрузки документов")
+        upload_url = upload_info.get("upload_url")
+        if not isinstance(upload_url, str) or not upload_url:
+            raise VKAPIError("VK не вернул адрес сервера загрузки документов")
+
         session = await self._get_session()
         form = aiohttp.FormData()
         form.add_field(
@@ -97,16 +103,43 @@ class VKAPIClient:
             content_type="application/octet-stream"
         )
 
-        async with session.post(upload_info["upload_url"], data=form) as response:
+        async with session.post(
+            upload_url,
+            data=form,
+            timeout=aiohttp.ClientTimeout(total=120),
+        ) as response:
             response.raise_for_status()
             upload_result = await response.json()
 
+        if not isinstance(upload_result, dict):
+            raise VKAPIError("Сервер загрузки VK вернул некорректный ответ")
+        upload_file = upload_result.get("file")
+        if not isinstance(upload_file, str) or not upload_file:
+            raise VKAPIError("Сервер загрузки VK не вернул идентификатор файла")
+
         saved = await self.call(
-            "docs.save", file=upload_result["file"], title=title
+            "docs.save", file=upload_file, title=title
         )
-        document = saved[0] if isinstance(saved, list) else saved
-        owner_id = document["owner_id"]
-        document_id = document["id"]
+
+        document = saved
+        if isinstance(document, list):
+            if not document:
+                raise VKAPIError("VK вернул пустой список документов")
+            document = document[0]
+        if isinstance(document, dict) and "doc" in document:
+            document = document["doc"]
+            if isinstance(document, list):
+                if not document:
+                    raise VKAPIError("VK вернул пустой список документов")
+                document = document[0]
+        if not isinstance(document, dict):
+            raise VKAPIError("VK вернул некорректную структуру ответа docs.save")
+
+        owner_id = document.get("owner_id")
+        document_id = document.get("id")
+        if owner_id is None or document_id is None:
+            raise VKAPIError("В ответе docs.save отсутствуют owner_id или id")
+
         access_key = document.get("access_key")
         attachment = f"doc{owner_id}_{document_id}"
         if access_key:
