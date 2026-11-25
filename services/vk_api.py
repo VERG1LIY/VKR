@@ -103,11 +103,7 @@ class VKAPIClient:
             content_type="application/octet-stream"
         )
 
-        async with session.post(
-            upload_url,
-            data=form,
-            timeout=aiohttp.ClientTimeout(total=120),
-        ) as response:
+        async with session.post(upload_url, data=form) as response:
             response.raise_for_status()
             upload_result = await response.json()
 

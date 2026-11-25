@@ -389,11 +389,11 @@ def test_vk_send_document_handles_wrapped_save_responses():
 
         class FakeSession:
             def __init__(self):
-                self.timeout = None
+                self.request_options = None
 
-            def post(self, url, data, timeout):
+            def post(self, url, data, **request_options):
                 assert url == "https://vk-upload.test/upload"
-                self.timeout = timeout
+                self.request_options = request_options
                 return UploadResponse()
 
         responses = [
@@ -433,7 +433,7 @@ def test_vk_send_document_handles_wrapped_save_responses():
                 "docs.save",
                 {"file": "upload-ticket", "title": "Manual"},
             )
-            assert session.timeout.total == 120
+            assert session.request_options == {}
 
         assert sent == [
             (42, "📎 Manual", "doc-10_21_key"),
@@ -443,7 +443,7 @@ def test_vk_send_document_handles_wrapped_save_responses():
     asyncio.run(exercise())
 
 
-def test_document_download_explains_missing_vk_documents_permission():
+def test_document_download_explains_vk_error_15_without_assuming_scope_missing():
     from services.vk_api import VKAPIError
 
     async def exercise():
@@ -471,7 +471,8 @@ def test_document_download_explains_missing_vk_documents_permission():
             app, 42, 42, "download_document", {"doc_id": "DOC-1"}
         )
 
-        assert "разрешения «Документы»" in vk_client.messages[-1]
+        assert "актуальный токен нужного сообщества" in vk_client.messages[-1]
+        assert "разрешение «Документы» выдано этому токену" in vk_client.messages[-1]
         assert "перезапустите бота" in vk_client.messages[-1]
 
     asyncio.run(exercise())
