@@ -9,6 +9,7 @@ import asyncio
 
 from config import Config
 from database.models import Document
+from utils.logger import logger
 
 
 class LLMProcessor:
@@ -25,9 +26,9 @@ class LLMProcessor:
             api_url: URL LM Studio API (например, http://localhost:1234/v1)
             model: Название модели (например, qwen-3-4b)
         """
-        self.api_url = api_url or Config.LLM_API_URL
+        self.api_url = (api_url or Config.LLM_API_URL).rstrip("/")
         self.model = model or Config.LLM_MODEL
-        self.enabled = True
+        self.enabled = bool(self.api_url)
         self._last_connection_error: Optional[str] = None
         self._warned_about_unavailability = False
         self._session: Optional[aiohttp.ClientSession] = None
@@ -47,9 +48,9 @@ class LLMProcessor:
                     self.enabled = True
                     self._last_connection_error = None
                     return True
+                self._last_connection_error = f"HTTP {response.status}"
         except Exception as exc:
             self._last_connection_error = str(exc)
-        self.enabled = False
         return False
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -97,22 +98,19 @@ class LLMProcessor:
                     data = await response.json()
                     return data["choices"][0]["message"]["content"]
                 else:
-                    self.enabled = False
                     if not self._warned_about_unavailability:
-                        print(f"⚠️ LLM API недоступен: статус {response.status}")
+                        logger.warning("LLM API вернул HTTP %s", response.status)
                         self._warned_about_unavailability = True
                     return None
 
         except asyncio.TimeoutError:
-            self.enabled = False
             if not self._warned_about_unavailability:
-                print("⚠️ LLM API таймаут (120 сек); используется режим без ИИ.")
+                logger.warning("LLM API: превышено время ожидания ответа (120 сек)")
                 self._warned_about_unavailability = True
             return None
         except Exception as e:
-            self.enabled = False
             if not self._warned_about_unavailability:
-                print(f"⚠️ LLM API недоступен: {e}")
+                logger.warning("LLM API недоступен: %s", e)
                 self._warned_about_unavailability = True
             return None
 

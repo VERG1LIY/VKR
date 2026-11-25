@@ -1,0 +1,35 @@
+{
+  "mode": "Local core, without VK or LLM",
+  "total_example_files": 10,
+  "imported": 7,
+  "ignored_files": [
+    "05 Реестр_заказов.xlsx",
+    "06 Журнал_контроля.xlsx",
+    "07 Учет_материалов.xlsx"
+  ],
+  "repeat_import": 0,
+  "query": "Паспорт",
+  "found": [
+    {
+      "id": "DOC-FS-20261117220855-001",
+      "title": "01 Паспорт_детали",
+      "status": "Активен"
+    }
+  ],
+  "active_count": 7,
+  "download_file": "01 Паспорт_детали.docx",
+  "download_size_bytes": 37380,
+  "download_sha256": "dde63ecee0eb8d3b36b40d1b79af3569a8275f29b9e57efe56c931c2fbd0962c",
+  "download_equals_original": true,
+  "empty_query_count": 0,
+  "checks_passed": 7,
+  "checks": [
+    "SQLite initialization",
+    "First folder import",
+    "Repeat import does not duplicate",
+    "Search for existing title",
+    "Status filtering",
+    "File retrieval equals source bytes",
+    "Nonexistent title returns no records"
+  ]
+}

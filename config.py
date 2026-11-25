@@ -66,9 +66,10 @@ class Config:
     # Файлы
     MAX_FILE_SIZE: int = int(os.getenv("MAX_FILE_SIZE", 52428800))  # 50MB
     UPLOAD_DIR: str = _resolve_project_path(os.getenv("UPLOAD_DIR", "uploads/documents"), "uploads/documents")
+    IMPORT_DIR: str = _resolve_project_path(os.getenv("IMPORT_DIR", "import_docs"), "import_docs")
 
     # Допустимые расширения файлов
-    ALLOWED_EXTENSIONS: tuple = (".docx", ".pdf", ".dwg")
+    ALLOWED_EXTENSIONS: tuple = (".docx", ".pdf", ".dwg", ".xlsx")
 
     # Параметры поиска
     SEARCH_LIMIT: int = 20

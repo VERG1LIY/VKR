@@ -345,7 +345,7 @@ class DocumentService:
                 file_hash = hashlib.sha256(source_file.read()).hexdigest()
             duplicate = await self.db.find_duplicate_document(file_name, file_hash)
             if duplicate:
-                if not duplicate.file_path:
+                if not duplicate.file_path or not os.path.isfile(duplicate.file_path):
                     await self.db.update_document(
                         duplicate.doc_id,
                         {
@@ -396,7 +396,9 @@ class DocumentService:
         repaired = 0
         seen_imports = set()
         for document in documents:
-            if document.file_path or not document.file_name:
+            if (
+                document.file_path and os.path.isfile(document.file_path)
+            ) or not document.file_name:
                 continue
             if document.doc_id.startswith("DOC-FS-"):
                 key = (document.title.casefold(), document.file_name.casefold())

@@ -30,13 +30,21 @@ async def init_services():
         model=Config.LLM_MODEL
     )
     if not await llm.is_available():
-        logger.warning("LM Studio недоступен по адресу %s; бот будет работать без ИИ.", Config.LLM_API_URL)
+        logger.warning(
+            "Начальная проверка LLM не прошла; бот повторит подключение при обработке запросов."
+        )
 
     # Ициализация сервиса документов
     document_service = DocumentService(db=db, llm=llm)
     repaired_files = await document_service.repair_missing_file_paths(Config.UPLOAD_DIR)
     if repaired_files:
         logger.info("Восстановлены пути к файлам документов: %s", repaired_files)
+    repaired_imports = await document_service.repair_missing_file_paths(Config.IMPORT_DIR)
+    if repaired_imports:
+        logger.info("Восстановлены пути к файлам из папки импорта: %s", repaired_imports)
+    imported_documents = await document_service.import_documents_from_folder(Config.IMPORT_DIR)
+    if imported_documents:
+        logger.info("Импортированы документы из папки импорта: %s", imported_documents)
 
     return db, document_service
 

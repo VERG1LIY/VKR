@@ -450,7 +450,7 @@ async def process_message(
         command, argument = parse_text_command(text)
         if is_first_message:
             await vk_client.send_message(peer_id, WELCOME_TEXT, keyboard=build_main_menu_keyboard())
-            if command in {"", "start", "help"}:
+            if command in {"start", "help"}:
                 return
         if command == "start":
             await vk_client.send_message(peer_id, WELCOME_TEXT, keyboard=build_main_menu_keyboard())
@@ -458,7 +458,7 @@ async def process_message(
         if current == "upload_waiting":
             await vk_client.send_message(
                 peer_id,
-                "Ожидаю файл документа. Прикрепите PDF, DOCX или DWG к сообщению.",
+                "Ожидаю файл документа. Прикрепите PDF, DOCX, DWG или XLSX к сообщению.",
                 keyboard=build_navigation_keyboard(),
             )
             return
@@ -471,6 +471,26 @@ async def process_message(
             command = "smart_search" if command == "smart" else "search"
 
         if command in {"search", "smart_search"} and argument:
+            use_llm = (
+                command == "smart_search"
+                or (current == "main" and not text.startswith("/"))
+            )
+            if use_llm:
+                docs = await app["document_service"].search_documents(argument)
+                result_text = await app["document_service"].process_free_text(argument)
+                if docs and len(docs) == 1:
+                    await _send_document_by_doc(app, vk_client, peer_id, docs[0])
+                elif docs:
+                    result_text += "\n\n" + _format_documents(
+                        docs, f"Найденные документы: {len(docs)}"
+                    )
+                keyboard = (
+                    build_document_results_keyboard(docs)
+                    if len(docs) > 1 else build_navigation_keyboard()
+                )
+                await vk_client.send_message(peer_id, result_text, keyboard=keyboard)
+                return
+
             if command == "search":
                 docs = await app["document_service"].search_documents(argument)
                 result_text = _format_documents(docs, f"Результаты поиска: {len(docs)}")
@@ -503,10 +523,13 @@ async def process_message(
             )
             return
 
-        response = await dispatch_text_command(
-            app["document_service"], vk_client, peer_id, sender_id,
-            command, argument, text
-        )
+        if not command and text:
+            response = await app["document_service"].process_free_text(text)
+        else:
+            response = await dispatch_text_command(
+                app["document_service"], vk_client, peer_id, sender_id,
+                command, argument, text
+            )
         await vk_client.send_message(peer_id, response)
     except Exception:
         logger.exception("Ошибка обработки VK-сообщения от %s", sender_id)

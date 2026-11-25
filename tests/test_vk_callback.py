@@ -117,15 +117,81 @@ def test_process_message_handles_text_command():
     asyncio.run(exercise())
 
 
-def test_llm_falls_back_when_server_is_unavailable():
+def test_llm_request_succeeds_after_health_check_failure():
     from services.llm_service import LLMProcessor
 
-    llm = LLMProcessor(api_url="http://127.0.0.1:1234/v1", model="qwen-3-4b")
-    try:
-        assert asyncio.run(llm.is_available()) is False
-        assert llm.enabled is False
-    finally:
-        asyncio.run(llm.close())
+    async def exercise():
+        app = web.Application()
+        requests = []
+
+        async def models(_request):
+            return web.Response(status=503)
+
+        async def chat_completions(request):
+            requests.append(await request.json())
+            return web.json_response(
+                {"choices": [{"message": {"content": "Ответ от модели"}}]}
+            )
+
+        app.router.add_get("/v1/models", models)
+        app.router.add_post("/v1/chat/completions", chat_completions)
+
+        async with TestServer(app) as server:
+            llm = LLMProcessor(
+                api_url=f"{server.make_url('/v1/').with_scheme('http')}",
+                model="test-model",
+            )
+            try:
+                assert await llm.is_available() is False
+                assert llm.enabled is True
+                response = await llm._make_request(
+                    [{"role": "user", "content": "test"}]
+                )
+                assert response == "Ответ от модели"
+                assert len(requests) == 1
+                assert requests[0]["model"] == "test-model"
+            finally:
+                await llm.close()
+
+    asyncio.run(exercise())
+
+
+def test_first_plain_message_uses_free_text_service():
+    async def exercise():
+        class FakeDB:
+            async def register_vk_user(self, _vk_id):
+                return True
+
+        class FakeVKClient:
+            def __init__(self):
+                self.messages = []
+
+            async def send_message(self, peer_id, message, attachment=None, keyboard=None):
+                self.messages.append(message)
+
+        class FakeService:
+            def __init__(self):
+                self.queries = []
+
+            async def process_free_text(self, text):
+                self.queries.append(text)
+                return "Ответ модели"
+
+        service = FakeService()
+        vk_client = FakeVKClient()
+        app = web.Application()
+        app["db"] = FakeDB()
+        app["document_service"] = service
+        app["vk_client"] = vk_client
+        app["menu_state"] = NavStateManager()
+        app["pending_uploads"] = {}
+
+        await process_message(app, {"text": "Как найти чертеж вала?"}, 101, 202)
+
+        assert service.queries == ["Как найти чертеж вала?"]
+        assert vk_client.messages[-1] == "Ответ модели"
+
+    asyncio.run(exercise())
 
 
 def test_single_search_result_sends_document_file():
@@ -161,6 +227,9 @@ def test_single_search_result_sends_document_file():
 
         async def search_documents(self, query):
             return [self.doc]
+
+        async def process_free_text(self, query):
+            return f"LLM: {query}"
 
         async def smart_search(self, query):
             return {"all_results": [self.doc], "message": "Найден документ", "llm_suggestions": []}
@@ -203,6 +272,9 @@ def test_multiple_search_results_have_document_action_buttons():
         async def search_documents(self, query):
             assert query == "вал"
             return [FakeDoc("DOC-1", "Вал 1"), FakeDoc("DOC-2", "Вал 2")]
+
+        async def process_free_text(self, query):
+            return "LLM ответ"
 
     class FakeDB:
         async def register_vk_user(self, vk_id):
@@ -387,7 +459,7 @@ def test_folder_import_repairs_legacy_file_and_is_idempotent(tmp_path):
                 "doc_id": "DOC-FS-OLD",
                 "title": "part",
                 "file_name": "part.pdf",
-                "file_path": None,
+                "file_path": str(source / "old-location" / "part.pdf"),
                 "tags": "imported",
             }
         )
@@ -437,6 +509,64 @@ def test_startup_repair_links_only_existing_database_records(tmp_path):
             "indexed.pdf",
         )
         await db.close()
+
+    asyncio.run(exercise())
+
+
+def test_folder_import_indexes_and_downloads_xlsx(tmp_path):
+    async def exercise():
+        source = tmp_path / "source"
+        source.mkdir()
+        source_file = source / "materials.xlsx"
+        source_file.write_bytes(b"spreadsheet")
+
+        db = DocumentDatabase(f"sqlite+aiosqlite:///{tmp_path / 'xlsx-import.db'}")
+        await db.initialize()
+        service = DocumentService(db=db)
+
+        assert await service.import_documents_from_folder(str(source)) == 1
+        docs, total = await service.get_document_list(page=1, per_page=10)
+        assert total == len(docs) == 1
+        assert docs[0].file_name == "materials.xlsx"
+        assert await service.download_document(docs[0].doc_id) == (
+            b"spreadsheet",
+            "materials.xlsx",
+        )
+        await db.close()
+
+    asyncio.run(exercise())
+
+
+def test_service_initialization_imports_configured_folder(tmp_path, monkeypatch):
+    from main import init_services
+
+    import main
+    from database.repository import DocumentDatabase
+
+    class FakeLLM:
+        enabled = True
+
+        async def is_available(self):
+            return False
+
+    async def exercise():
+        import_dir = tmp_path / "import_docs"
+        import_dir.mkdir()
+        (import_dir / "startup.pdf").write_bytes(b"startup-pdf")
+
+        db = DocumentDatabase(f"sqlite+aiosqlite:///{tmp_path / 'startup.db'}")
+        monkeypatch.setattr(main, "DocumentDatabase", lambda: db)
+        monkeypatch.setattr(main.Config, "IMPORT_DIR", str(import_dir))
+        monkeypatch.setattr(main.Config, "UPLOAD_DIR", str(tmp_path / "uploads"))
+        monkeypatch.setattr(main, "LLMProcessor", lambda **_kwargs: FakeLLM())
+
+        db, service = await init_services()
+        try:
+            docs, total = await service.get_document_list(page=1, per_page=10)
+            assert total == len(docs) == 1
+            assert docs[0].file_name == "startup.pdf"
+        finally:
+            await db.close()
 
     asyncio.run(exercise())
 

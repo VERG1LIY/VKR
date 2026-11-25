@@ -111,9 +111,13 @@ MAX_FILE_SIZE=52428800
 
 # Upload directory
 UPLOAD_DIR=uploads/documents
+
+# Folder scanned for documents on startup
+IMPORT_DIR=import_docs
 ```
 
 `VK_ACCESS_TOKEN` must be a community token with permissions for messages and documents. `VK_CALLBACK_SECRET` must match the Callback API secret key, and `VK_CONFIRMATION_CODE` must match the confirmation code shown by VK for this Callback server. Do not publish the filled-in `.env` or add it to Git.
+The bot indexes supported files from `IMPORT_DIR` on startup. The configured `LLM_API_URL` must be reachable from the bot server; use `localhost` only when LM Studio runs on that same machine.
 
 ### 5. Launching LM Studio (optional, for AI features)
 1. Download and install [LM Studio](https://lmstudio.ai/)
@@ -184,7 +188,7 @@ sqlite3 documents.db < database/init_test_data.sql
 
 - All database queries use parameterized queries (SQLAlchemy)
 - Maximum size of a file uploaded to the archive: 50 MB
-- Allowed extensions: .docx, .pdf, .dwg
+- Allowed extensions: .docx, .pdf, .dwg, .xlsx
 - Callback secret verification and protection of data-modifying commands at the application level
 - Fallback to JSON storage when the database is unavailable
 - Graceful shutdown on termination
@@ -347,9 +351,13 @@ MAX_FILE_SIZE=52428800
 
 # Директория для загрузок
 UPLOAD_DIR=uploads/documents
+
+# Папка, из которой документы индексируются при запуске
+IMPORT_DIR=import_docs
 ```
 
 `VK_ACCESS_TOKEN` должен быть токеном сообщества с разрешениями на сообщения и документы. `VK_CALLBACK_SECRET` должен совпадать с секретным ключом Callback API, а `VK_CONFIRMATION_CODE` — с кодом подтверждения, показанным VK для этого Callback-сервера. Не публикуйте заполненный `.env` и не добавляйте его в Git.
+При запуске бот индексирует поддерживаемые файлы из `IMPORT_DIR`. Адрес `LLM_API_URL` должен быть доступен с сервера бота; `localhost` подходит только если LM Studio запущена на той же машине.
 
 ### 5. Запуск LM Studio (опционально, для работы с ИИ)
 1. Скачайте и установите [LM Studio](https://lmstudio.ai/)
@@ -420,7 +428,7 @@ sqlite3 documents.db < database/init_test_data.sql
 
 - Все запросы к БД — через параметризованные запросы (SQLAlchemy)
 - Максимальный размер загружаемого в архив файла: 50МБ
-- Допустимые расширения: .docx, .pdf, .dwg
+- Допустимые расширения: .docx, .pdf, .dwg, .xlsx
 - Проверка Callback-секрета и защита команд изменения данных на уровне приложения
 - Fallback на JSON-хранилище при недоступности БД
 - Graceful shutdown при завершении
