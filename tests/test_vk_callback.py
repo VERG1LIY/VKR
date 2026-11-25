@@ -14,6 +14,9 @@ from handlers.vk_callback import (
     parse_payload,
     build_payload,
     build_main_menu_keyboard,
+    build_document_list_keyboard,
+    build_document_results_keyboard,
+    build_tag_keyboard,
     process_message,
     persist_pending_upload,
     handle_vk_action,
@@ -298,6 +301,143 @@ def test_multiple_search_results_have_document_action_buttons():
     ]
     assert {"action": "open_document", "doc_id": "DOC-1"} in payloads
     assert {"action": "open_document", "doc_id": "DOC-2"} in payloads
+
+
+def test_vk_keyboards_stay_within_ten_row_limit():
+    class FakeDoc:
+        def __init__(self, index):
+            self.doc_id = f"DOC-{index}"
+            self.title = f"Document {index}"
+
+    docs = [FakeDoc(index) for index in range(25)]
+    keyboards = (
+        build_document_list_keyboard(1, 4, docs),
+        build_document_results_keyboard(docs),
+        build_tag_keyboard([f"tag-{index}" for index in range(25)]),
+    )
+
+    for keyboard in keyboards:
+        assert len(keyboard["buttons"]) <= 10
+        assert all(len(row) <= 5 for row in keyboard["buttons"])
+        assert all(
+            len(button["action"]["label"]) <= 40
+            for row in keyboard["buttons"]
+            for button in row
+        )
+
+
+def test_document_card_and_back_return_to_current_list_page(tmp_path):
+    async def exercise():
+        file_path = tmp_path / "existing.pdf"
+        file_path.write_bytes(b"pdf")
+
+        class FakeDoc:
+            def __init__(self, index):
+                self.doc_id = f"DOC-{index}"
+                self.title = f"Document {index}"
+                self.status = "Активен"
+                self.file_path = str(file_path)
+
+        class FakeService:
+            def __init__(self):
+                self.docs = [FakeDoc(index) for index in range(20)]
+                self.list_calls = []
+                self.download_calls = 0
+
+            async def get_document_list(self, page=1, per_page=10):
+                self.list_calls.append((page, per_page))
+                start = (page - 1) * per_page
+                return self.docs[start : start + per_page], len(self.docs)
+
+            async def get_document_info(self, doc_id):
+                doc = next(doc for doc in self.docs if doc.doc_id == doc_id)
+                return {
+                    "doc_id": doc.doc_id,
+                    "title": doc.title,
+                    "status": doc.status,
+                    "file_path": doc.file_path,
+                }
+
+            async def download_document(self, _doc_id):
+                self.download_calls += 1
+                return b"pdf", "existing.pdf"
+
+        class FakeVKClient:
+            def __init__(self):
+                self.messages = []
+                self.documents = []
+
+            async def send_message(self, peer_id, message, attachment=None, keyboard=None):
+                self.messages.append({"message": message, "keyboard": keyboard})
+
+            async def send_document(self, *args):
+                self.documents.append(args)
+
+        service = FakeService()
+        vk_client = FakeVKClient()
+        state = NavStateManager()
+        app = web.Application()
+        app["document_service"] = service
+        app["vk_client"] = vk_client
+        app["menu_state"] = state
+
+        await handle_vk_action(app, 42, 42, "open_document_list")
+        await handle_vk_action(app, 42, 42, "list_page", {"page": 2})
+        list_keyboard = vk_client.messages[-1]["keyboard"]
+        open_payload = parse_payload(
+            list_keyboard["buttons"][0][0]["action"]["payload"]
+        )
+        assert open_payload["page"] == 2
+
+        await handle_vk_action(app, 42, 42, "open_document", open_payload)
+        assert state.current(42) == "document_card"
+        assert service.download_calls == 0
+        assert not vk_client.documents
+        assert "Файл доступен" in vk_client.messages[-1]["message"]
+
+        await handle_vk_action(app, 42, 42, "back")
+        assert state.current(42) == "document_list"
+        assert service.list_calls[-1] == (2, 8)
+        assert "Документы 2/3" in vk_client.messages[-1]["message"]
+
+    asyncio.run(exercise())
+
+
+def test_document_without_file_still_opens_card_without_download_button():
+    async def exercise():
+        class FakeService:
+            async def get_document_info(self, doc_id):
+                return {
+                    "doc_id": doc_id,
+                    "title": "Metadata only",
+                    "file_path": None,
+                }
+
+        class FakeVKClient:
+            def __init__(self):
+                self.messages = []
+
+            async def send_message(self, peer_id, message, attachment=None, keyboard=None):
+                self.messages.append({"message": message, "keyboard": keyboard})
+
+        state = NavStateManager()
+        vk_client = FakeVKClient()
+        app = web.Application()
+        app["document_service"] = FakeService()
+        app["vk_client"] = vk_client
+        app["menu_state"] = state
+
+        await handle_vk_action(app, 42, 42, "open_document", {"doc_id": "DOC-1"})
+
+        assert "Файл отсутствует" in vk_client.messages[-1]["message"]
+        payloads = [
+            parse_payload(button["action"]["payload"])
+            for row in vk_client.messages[-1]["keyboard"]["buttons"]
+            for button in row
+        ]
+        assert not any(item.get("action") == "download_document" for item in payloads)
+
+    asyncio.run(exercise())
 
 
 def test_vk_user_is_greeted_only_once(tmp_path):

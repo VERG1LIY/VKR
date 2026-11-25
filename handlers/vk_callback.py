@@ -30,6 +30,7 @@ WELCOME_TEXT = (
 )
 
 HELP_TEXT = WELCOME_TEXT.replace("Добро пожаловать! Я бот архива технической документации.\n\n", "")
+DOCUMENTS_PER_PAGE = 8
 
 
 class NavStateManager:
@@ -37,6 +38,7 @@ class NavStateManager:
 
     def __init__(self):
         self._states: Dict[int, List[str]] = {}
+        self._document_pages: Dict[int, int] = {}
 
     def get(self, user_id: int) -> List[str]:
         return self._states.setdefault(user_id, ["main"])
@@ -63,7 +65,14 @@ class NavStateManager:
 
     def reset(self, user_id: int) -> List[str]:
         self._states[user_id] = ["main"]
+        self._document_pages[user_id] = 1
         return self._states[user_id]
+
+    def set_document_page(self, user_id: int, page: int) -> None:
+        self._document_pages[user_id] = max(page, 1)
+
+    def document_page(self, user_id: int) -> int:
+        return self._document_pages.get(user_id, 1)
 
 
 def build_payload(action: str, **kwargs: Any) -> str:
@@ -124,7 +133,7 @@ def build_filter_menu_keyboard() -> Dict[str, Any]:
     return {"one_time": False, "buttons": buttons}
 
 
-def build_tag_keyboard(tags: List[str], page: int = 1, per_page: int = 20) -> Dict[str, Any]:
+def build_tag_keyboard(tags: List[str], page: int = 1, per_page: int = 8) -> Dict[str, Any]:
     total_pages = max((len(tags) + per_page - 1) // per_page, 1)
     page = min(max(page, 1), total_pages)
     start = (page - 1) * per_page
@@ -147,9 +156,12 @@ def build_tag_keyboard(tags: List[str], page: int = 1, per_page: int = 20) -> Di
 def build_document_list_keyboard(page: int, total_pages: int, docs: Optional[List[Any]] = None) -> Dict[str, Any]:
     buttons: List[List[Dict[str, Any]]] = []
     if docs:
-        for doc in docs:
+        for doc in docs[:DOCUMENTS_PER_PAGE]:
             buttons.append([
-                _button(f"{doc.doc_id}", "open_document", doc_id=doc.doc_id),
+                _button(
+                    str(doc.doc_id)[:40], "open_document",
+                    doc_id=doc.doc_id, page=page,
+                ),
             ])
     nav = []
     if page > 1:
@@ -165,7 +177,7 @@ def build_document_list_keyboard(page: int, total_pages: int, docs: Optional[Lis
 def build_document_results_keyboard(docs: List[Any]) -> Dict[str, Any]:
     buttons = [
         [_button(f"{doc.doc_id} — {doc.title}"[:40], "open_document", doc_id=doc.doc_id)]
-        for doc in docs[:10]
+        for doc in docs[:9]
     ]
     buttons.append([_button("◀️ Назад", "back"), _button("🏠 Главное меню", "main_menu")])
     return {"one_time": False, "buttons": buttons}
@@ -390,7 +402,9 @@ async def handle_callback(request: web.Request) -> web.Response:
         peer_id = event_object.get("peer_id") or user_id
         if action and user_id and peer_id:
             task = asyncio.create_task(
-                handle_vk_action(request.app, int(user_id), int(peer_id), action, payload_data)
+                _handle_vk_action_safely(
+                    request.app, int(user_id), int(peer_id), action, payload_data
+                )
             )
             request.app["tasks"].add(task)
             task.add_done_callback(request.app["tasks"].discard)
@@ -608,7 +622,7 @@ async def handle_vk_action(
 
     if action == "filter_tags_page":
         tags = await service.get_available_tags()
-        page = int(payload.get("page", 1))
+        page = _payload_page(payload)
         await vk_client.send_message(
             peer_id, "Выберите тег:", keyboard=build_tag_keyboard(tags, page=page)
         )
@@ -629,12 +643,18 @@ async def handle_vk_action(
 
     if action == "open_document_list":
         state.push(sender_id, "document_list")
-        await _show_document_list(service, vk_client, peer_id, page=1)
+        state.set_document_page(sender_id, 1)
+        await _show_document_list(
+            service, vk_client, peer_id, page=1, state=state, sender_id=sender_id
+        )
         return
 
     if action == "list_page":
-        page = int(payload.get("page", 1))
-        await _show_document_list(service, vk_client, peer_id, page=page)
+        page = _payload_page(payload)
+        state.set_document_page(sender_id, page)
+        await _show_document_list(
+            service, vk_client, peer_id, page=page, state=state, sender_id=sender_id
+        )
         return
 
     if action == "open_upload":
@@ -664,22 +684,31 @@ async def handle_vk_action(
         return
 
     if action == "open_document":
-        doc_id = payload.get("doc_id")
+        doc_id = str(payload.get("doc_id", "")).strip()
         if doc_id:
+            if "page" in payload:
+                state.set_document_page(sender_id, _payload_page(payload))
+            state.push(sender_id, "document_card")
             await _show_document_card(service, vk_client, peer_id, doc_id)
         return
 
     if action == "download_document":
-        doc_id = payload.get("doc_id")
+        doc_id = str(payload.get("doc_id", "")).strip()
         if not doc_id:
             return
-        file_data = await service.download_document(doc_id)
-        if not file_data:
-            await vk_client.send_message(peer_id, f"Файл документа {doc_id} не найден.")
-            return
-        content, file_name = file_data
-        await vk_client.send_document(peer_id, content, file_name, f"{doc_id} — {file_name}")
-        await vk_client.send_message(peer_id, "Файл отправлен.", keyboard=build_navigation_keyboard())
+        try:
+            file_data = await service.download_document(doc_id)
+            if not file_data:
+                await vk_client.send_message(peer_id, f"Файл документа {doc_id} не найден на сервере.")
+                return
+            content, file_name = file_data
+            await vk_client.send_document(peer_id, content, file_name, f"{doc_id} — {file_name}")
+            await vk_client.send_message(peer_id, "Файл отправлен.", keyboard=build_navigation_keyboard())
+        except Exception:
+            logger.exception("Не удалось отправить файл документа %s", doc_id)
+            await vk_client.send_message(
+                peer_id, "Не удалось отправить файл. Проверьте VK API и наличие файла на сервере."
+            )
         return
 
 
@@ -700,13 +729,26 @@ async def _show_screen(
         await app["vk_client"].send_message(peer_id, "Введите запрос для умного поиска.", keyboard=build_navigation_keyboard())
         return
     if screen == "document_list":
-        await _show_document_list(app["document_service"], app["vk_client"], peer_id, page=1)
+        await _show_document_list(
+            app["document_service"],
+            app["vk_client"],
+            peer_id,
+            page=app["menu_state"].document_page(sender_id),
+            state=app["menu_state"],
+            sender_id=sender_id,
+        )
         return
     if screen == "filters":
         await app["vk_client"].send_message(peer_id, "Выберите критерий фильтрации:", keyboard=build_filter_menu_keyboard())
         return
     if screen.startswith("filter:"):
         filter_name = screen.split(":", 1)[1]
+        if filter_name == "tags":
+            tags = await app["document_service"].get_available_tags()
+            await app["vk_client"].send_message(
+                peer_id, "Выберите тег:", keyboard=build_tag_keyboard(tags)
+            )
+            return
         await app["vk_client"].send_message(peer_id, f"Параметр: {filter_name}. Введите значение для фильтра.", keyboard=build_navigation_keyboard())
         return
     if screen == "upload_waiting":
@@ -722,16 +764,32 @@ async def _show_document_list(
     vk_client: VKAPIClient,
     peer_id: int,
     page: int = 1,
+    state: Optional[NavStateManager] = None,
+    sender_id: Optional[int] = None,
 ) -> None:
-    docs, total = await service.get_document_list(page=max(page, 1), per_page=10)
-    total_pages = max((total + 9) // 10, 1)
+    page = max(page, 1)
+    docs, total = await service.get_document_list(
+        page=page, per_page=DOCUMENTS_PER_PAGE
+    )
+    total_pages = max((total + DOCUMENTS_PER_PAGE - 1) // DOCUMENTS_PER_PAGE, 1)
+    if page > total_pages:
+        page = total_pages
+        docs, _ = await service.get_document_list(
+            page=page, per_page=DOCUMENTS_PER_PAGE
+        )
+    if state is not None and sender_id is not None:
+        state.set_document_page(sender_id, page)
     title = f"Документы {page}/{total_pages} из {total}"
     if not docs:
         text = "В архиве пока нет документов."
     else:
         lines = [title]
         for index, doc in enumerate(docs, 1):
-            lines.append(f"{(page - 1) * 10 + index}. {doc.doc_id} — {doc.title}")
+            file_marker = "📎" if _has_local_file(getattr(doc, "file_path", None)) else "⚠️"
+            lines.append(
+                f"{(page - 1) * DOCUMENTS_PER_PAGE + index}. "
+                f"{file_marker} {doc.doc_id} — {doc.title}"
+            )
         text = "\n".join(lines)
     await vk_client.send_message(
         peer_id,
@@ -777,18 +835,57 @@ async def _show_document_card(
         f"Теги: {info.get('tags') or 'нет'}\n"
         f"Описание: {info.get('description') or 'нет'}"
     )
-    file_data = await service.download_document(doc_id)
-    if file_data:
-        content, file_name = file_data
-        await vk_client.send_document(peer_id, content, file_name, f"{doc_id} — {file_name}")
-    keyboard = {
-        "one_time": False,
-        "buttons": [
+    has_file = _has_local_file(info.get("file_path"))
+    if has_file:
+        text += "\nФайл доступен для скачивания."
+        buttons = [
             [_button("📥 Получить файл", "download_document", doc_id=doc_id)],
             [_button("◀️ Назад", "back"), _button("🏠 Главное меню", "main_menu")],
-        ],
+        ]
+    else:
+        text += "\n⚠️ Файл отсутствует на сервере; доступна только карточка документа."
+        buttons = [
+            [_button("◀️ Назад", "back"), _button("🏠 Главное меню", "main_menu")],
+        ]
+    keyboard = {
+        "one_time": False,
+        "buttons": buttons,
     }
     await vk_client.send_message(peer_id, text, keyboard=keyboard)
+
+
+def _has_local_file(file_path: Optional[str]) -> bool:
+    if not file_path:
+        return False
+    resolved_path = file_path if os.path.isabs(file_path) else os.path.join(os.getcwd(), file_path)
+    return os.path.isfile(resolved_path)
+
+
+def _payload_page(payload: Dict[str, Any]) -> int:
+    try:
+        return max(int(payload.get("page", 1)), 1)
+    except (TypeError, ValueError):
+        logger.warning("Некорректный номер страницы в payload кнопки")
+        return 1
+
+
+async def _handle_vk_action_safely(
+    app: web.Application,
+    sender_id: int,
+    peer_id: int,
+    action: str,
+    payload: Dict[str, Any],
+) -> None:
+    try:
+        await handle_vk_action(app, sender_id, peer_id, action, payload)
+    except Exception:
+        logger.exception("Ошибка callback-действия %s от пользователя %s", action, sender_id)
+        try:
+            await app["vk_client"].send_message(
+                peer_id, "Не удалось выполнить действие. Попробуйте ещё раз."
+            )
+        except Exception:
+            logger.exception("Не удалось отправить сообщение об ошибке VK callback")
 
 
 async def prepare_upload_document(
