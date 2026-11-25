@@ -20,6 +20,12 @@ An asynchronous VK community bot for managing technical documentation. Receives 
 
 Commands are also accepted as `/search ...`, `/help`, etc. The user's first message receives a greeting with help; arbitrary text is processed via RAG.
 
+The document list is paginated (8 documents per page); buttons use document titles, falling back to IDs when a title is missing. The Back button returns to the current list page. A document card remains viewable when its file is missing, but downloading is offered only when the file exists on the server.
+
+At startup, the bot scans the top level of `IMPORT_DIR` for `.docx`, `.pdf`, `.dwg`, and `.xlsx` files. Duplicate imports are skipped, and existing records with missing paths can be relinked when the corresponding file is present. Files must remain available on the server for download.
+
+Free-form queries use the configured LLM with retrieved document context when available. If the LLM request fails or times out, the bot falls back to a basic search response; it does not retry the same LLM request automatically.
+
 ## Tech Stack
 
 - **Python 3.10+**
@@ -120,6 +126,12 @@ IMPORT_DIR=import_docs
 The bot indexes supported files from `IMPORT_DIR` on startup. The configured `LLM_API_URL` must be reachable from the bot server; use `localhost` only when LM Studio runs on that same machine.
 If VK returns error 15 for `docs.getMessagesUploadServer`, verify that the running process uses the current token for the intended community and that the Documents permission is granted to that token. If you replace the token, update the active environment or `.env` and restart the bot; process environment variables take precedence over `.env`.
 
+### VK API connectivity and document delivery
+
+Sending a file requires several sequential VK operations: request an upload server, upload the file, save it with `docs.save`, then send the resulting attachment with `messages.send`. VK requests and file transfers use the client's 20-second HTTP timeout. The client does not automatically retry failed VK requests or uploads.
+
+Intermittent connection errors can occur if the bot server cannot reach VK over HTTPS, DNS or firewall/proxy connectivity is interrupted, or VK's API/upload service is temporarily unavailable. Check the bot's server log for the failed method or network exception. After connectivity is restored, retry the user's document request. A VK API error response such as code 15 is an access/scope rejection, not a network timeout; confirm the token actually loaded by the running process and that it belongs to the intended community.
+
 ### 5. Launching LM Studio (optional, for AI features)
 1. Download and install [LM Studio](https://lmstudio.ai/)
 2. Load a model (e.g., `qwen-3-4b` or `mistral-7b`)
@@ -199,6 +211,7 @@ sqlite3 documents.db < database/init_test_data.sql
 - When the database is unavailable, JSON storage is used (`fallback_db.json`)
 - When the LLM is unavailable — basic search via SQL
 - Timeout handling for LLM requests (120 sec)
+- VK API requests and file uploads use a 20-second HTTP timeout; failed requests are not retried automatically
 - Error and exception handling in all methods
 
 ## Usage Examples
@@ -260,6 +273,12 @@ Bot: 🔍 Анализирую запрос...
 | `добавить Название | Тип | Номер | Версия | Техпроцесс | Теги | Описание` | Добавить карточку (администратор) |
 
 Команды также принимаются в виде `/search ...`, `/help` и т.п. Первое сообщение пользователя получает приветствие со справкой; произвольный текст обрабатывается через RAG.
+
+Список документов разбит на страницы по 8 записей; в кнопках отображаются названия документов, а при отсутствии названия — ID. Кнопка «Назад» возвращает на текущую страницу списка. Карточку можно открыть и для документа без файла, но кнопка скачивания показывается только если файл доступен на сервере.
+
+При запуске бот просматривает файлы верхнего уровня `IMPORT_DIR` с расширениями `.docx`, `.pdf`, `.dwg` и `.xlsx`. Повторный импорт тех же файлов пропускается; существующие записи с потерянным путём к файлу могут быть связаны с найденным файлом. Для скачивания файлы должны оставаться доступными на сервере.
+
+Свободные запросы при настроенной LLM обрабатываются с контекстом найденных документов. Если запрос к LLM завершается ошибкой или таймаутом, бот использует базовый ответ по результатам поиска; автоматического повтора того же запроса к LLM нет.
 
 ## Технический стек
 
@@ -361,6 +380,12 @@ IMPORT_DIR=import_docs
 При запуске бот индексирует поддерживаемые файлы из `IMPORT_DIR`. Адрес `LLM_API_URL` должен быть доступен с сервера бота; `localhost` подходит только если LM Studio запущена на той же машине.
 Если VK возвращает ошибку 15 для `docs.getMessagesUploadServer`, проверьте, что запущенный процесс использует актуальный токен нужного сообщества и разрешение «Документы» выдано именно этому токену. После замены токена обновите активное окружение или `.env` и перезапустите бота; переменные окружения процесса имеют приоритет над `.env`.
 
+### Подключение к VK API и отправка документов
+
+Отправка файла состоит из нескольких последовательных операций VK: запрос сервера загрузки, загрузка файла, сохранение через `docs.save`, затем отправка вложения через `messages.send`. Для запросов VK и загрузки файлов действует общий HTTP-таймаут клиента 20 секунд. Автоматических повторов неудачных запросов или загрузок нет.
+
+Периодические ошибки подключения возможны, если сервер бота временно не может обращаться к VK по HTTPS, возникают сбои DNS/сети/фаервола/прокси либо временно недоступен API или сервер загрузки VK. Проверьте лог бота на сервере: там указываются метод VK или сетевая ошибка. После восстановления связи повторите запрос на документ. Ответ VK с кодом 15 означает отказ в доступе/правах, а не сетевой таймаут: проверьте фактически загруженный токен и что он относится к нужному сообществу.
+
 ### 5. Запуск LM Studio (опционально, для работы с ИИ)
 1. Скачайте и установите [LM Studio](https://lmstudio.ai/)
 2. Загрузите модель (например, `qwen-3-4b` или `mistral-7b`)
@@ -440,6 +465,7 @@ sqlite3 documents.db < database/init_test_data.sql
 - При недоступности БД используется JSON-хранилище (`fallback_db.json`)
 - При недоступности LLM — базовый поиск через SQL
 - Обработка таймаутов при запросах к LLM (120 сек)
+- Для запросов к VK API и загрузки файлов действует HTTP-таймаут 20 секунд; автоматических повторов нет
 - Обработка ошибок и исключений во всех методах
 
 ## Примеры использования
