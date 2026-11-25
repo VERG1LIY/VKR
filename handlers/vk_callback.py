@@ -10,7 +10,7 @@ from aiohttp import web
 from config import Config
 from services.document_service import DocumentService
 from services.file_service import FileService
-from services.vk_api import VKAPIClient
+from services.vk_api import VKAPIClient, VKAPIError
 from utils.logger import logger
 
 WELCOME_TEXT = (
@@ -159,7 +159,8 @@ def build_document_list_keyboard(page: int, total_pages: int, docs: Optional[Lis
         for doc in docs[:DOCUMENTS_PER_PAGE]:
             buttons.append([
                 _button(
-                    str(doc.doc_id)[:40], "open_document",
+                    str(getattr(doc, "title", None) or doc.doc_id)[:40],
+                    "open_document",
                     doc_id=doc.doc_id, page=page,
                 ),
             ])
@@ -176,7 +177,13 @@ def build_document_list_keyboard(page: int, total_pages: int, docs: Optional[Lis
 
 def build_document_results_keyboard(docs: List[Any]) -> Dict[str, Any]:
     buttons = [
-        [_button(f"{doc.doc_id} — {doc.title}"[:40], "open_document", doc_id=doc.doc_id)]
+        [
+            _button(
+                str(getattr(doc, "title", None) or doc.doc_id)[:40],
+                "open_document",
+                doc_id=doc.doc_id,
+            )
+        ]
         for doc in docs[:9]
     ]
     buttons.append([_button("◀️ Назад", "back"), _button("🏠 Главное меню", "main_menu")])
@@ -704,6 +711,17 @@ async def handle_vk_action(
             content, file_name = file_data
             await vk_client.send_document(peer_id, content, file_name, f"{doc_id} — {file_name}")
             await vk_client.send_message(peer_id, "Файл отправлен.", keyboard=build_navigation_keyboard())
+        except VKAPIError as exc:
+            logger.exception("Не удалось отправить файл документа %s", doc_id)
+            if exc.error_code == 15:
+                message = (
+                    "VK отклонил отправку: у токена сообщества нет разрешения "
+                    "«Документы». Включите это разрешение, перевыпустите токен, "
+                    "обновите VK_ACCESS_TOKEN и перезапустите бота."
+                )
+            else:
+                message = "VK API не смог отправить файл. Проверьте настройки токена и повторите попытку."
+            await vk_client.send_message(peer_id, message)
         except Exception:
             logger.exception("Не удалось отправить файл документа %s", doc_id)
             await vk_client.send_message(

@@ -324,6 +324,84 @@ def test_vk_keyboards_stay_within_ten_row_limit():
             for row in keyboard["buttons"]
             for button in row
         )
+    assert keyboards[0]["buttons"][0][0]["action"]["label"] == "Document 0"
+    assert keyboards[1]["buttons"][0][0]["action"]["label"] == "Document 0"
+
+
+def test_vk_api_error_keeps_permission_code():
+    from services.vk_api import VKAPIClient, VKAPIError
+
+    class FakeResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        async def json(self):
+            return {
+                "error": {
+                    "error_code": 15,
+                    "error_msg": "Access denied: no access to call this method.",
+                }
+            }
+
+    class FakeSession:
+        def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    async def exercise():
+        client = VKAPIClient("test-token")
+
+        async def get_session():
+            return FakeSession()
+
+        client._get_session = get_session
+        try:
+            await client.call("docs.getMessagesUploadServer", peer_id=1, type="doc")
+        except VKAPIError as exc:
+            assert exc.error_code == 15
+        else:
+            raise AssertionError("Expected VKAPIError for missing Documents permission")
+
+    asyncio.run(exercise())
+
+
+def test_document_download_explains_missing_vk_documents_permission():
+    from services.vk_api import VKAPIError
+
+    async def exercise():
+        class FakeService:
+            async def download_document(self, _doc_id):
+                return b"document", "document.pdf"
+
+        class FakeVKClient:
+            def __init__(self):
+                self.messages = []
+
+            async def send_document(self, *_args):
+                raise VKAPIError("Access denied", error_code=15)
+
+            async def send_message(self, _peer_id, message, **_kwargs):
+                self.messages.append(message)
+
+        vk_client = FakeVKClient()
+        app = web.Application()
+        app["document_service"] = FakeService()
+        app["vk_client"] = vk_client
+        app["menu_state"] = NavStateManager()
+
+        await handle_vk_action(
+            app, 42, 42, "download_document", {"doc_id": "DOC-1"}
+        )
+
+        assert "разрешения «Документы»" in vk_client.messages[-1]
+        assert "перезапустите бота" in vk_client.messages[-1]
+
+    asyncio.run(exercise())
 
 
 def test_document_card_and_back_return_to_current_list_page(tmp_path):

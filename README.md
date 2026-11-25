@@ -118,6 +118,7 @@ IMPORT_DIR=import_docs
 
 `VK_ACCESS_TOKEN` must be a community token with permissions for messages and documents. `VK_CALLBACK_SECRET` must match the Callback API secret key, and `VK_CONFIRMATION_CODE` must match the confirmation code shown by VK for this Callback server. Do not publish the filled-in `.env` or add it to Git.
 The bot indexes supported files from `IMPORT_DIR` on startup. The configured `LLM_API_URL` must be reachable from the bot server; use `localhost` only when LM Studio runs on that same machine.
+If VK returns error 15 for `docs.getMessagesUploadServer`, enable the community token's Documents permission, issue a new token, update `VK_ACCESS_TOKEN`, and restart the bot.
 
 ### 5. Launching LM Studio (optional, for AI features)
 1. Download and install [LM Studio](https://lmstudio.ai/)
@@ -358,6 +359,7 @@ IMPORT_DIR=import_docs
 
 `VK_ACCESS_TOKEN` должен быть токеном сообщества с разрешениями на сообщения и документы. `VK_CALLBACK_SECRET` должен совпадать с секретным ключом Callback API, а `VK_CONFIRMATION_CODE` — с кодом подтверждения, показанным VK для этого Callback-сервера. Не публикуйте заполненный `.env` и не добавляйте его в Git.
 При запуске бот индексирует поддерживаемые файлы из `IMPORT_DIR`. Адрес `LLM_API_URL` должен быть доступен с сервера бота; `localhost` подходит только если LM Studio запущена на той же машине.
+Если VK возвращает ошибку 15 для `docs.getMessagesUploadServer`, включите разрешение «Документы» для токена сообщества, выпустите новый токен, обновите `VK_ACCESS_TOKEN` и перезапустите бота.
 
 ### 5. Запуск LM Studio (опционально, для работы с ИИ)
 1. Скачайте и установите [LM Studio](https://lmstudio.ai/)

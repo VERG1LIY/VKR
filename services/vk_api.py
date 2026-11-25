@@ -10,6 +10,10 @@ import aiohttp
 class VKAPIError(RuntimeError):
     """Ошибка вызова VK API."""
 
+    def __init__(self, message: str, error_code: Optional[int] = None):
+        super().__init__(message)
+        self.error_code = error_code
+
 
 class VKAPIClient:
     def __init__(self, access_token: str, api_version: str = "5.199"):
@@ -42,7 +46,8 @@ class VKAPIClient:
             error = body["error"]
             raise VKAPIError(
                 f"VK API {method}: {error.get('error_code')} "
-                f"{error.get('error_msg', 'unknown error')}"
+                f"{error.get('error_msg', 'unknown error')}",
+                error_code=error.get("error_code"),
             )
         return body.get("response")
 
